@@ -151,6 +151,8 @@ class Simulation:
     def _schedule(self, time: float, kind: str, payload: Any = None) -> None:
         time = self._clean_time(time)
         self.sequence += 1
+        # El heap ordena primero por tiempo y luego por EVENT_PRIORITY. De esta
+        # forma se resuelven de manera reproducible los eventos simultaneos.
         heapq.heappush(
             self.events,
             (time, EVENT_PRIORITY[kind], self.sequence, kind, payload),
@@ -168,8 +170,13 @@ class Simulation:
             raise RuntimeError("El calendario de eventos retrocedió en el tiempo")
         if delta > 0:
             for stop in (1, 2):
+                # Entre dos eventos la longitud de la cola no cambia.
+                # Area de cola = cantidad en cola * tiempo transcurrido.
+                # Al finalizar: cola promedio = area de cola / horizonte.
                 self.queue_area[stop] += self.queue_counts[stop] * delta
             if self.wagon_state == "En viaje":
+                # Acumula los minutos en los que el vagon estuvo ocupado.
+                # Al finalizar: utilizacion = tiempo ocupado / horizonte.
                 self.wagon_busy_area += delta
         self.last_clock = new_time
 
@@ -178,6 +185,8 @@ class Simulation:
 
     def _next_abandonment(self, stop: int) -> Optional[float]:
         calendar = self.abandonment_calendars[stop]
+        # Los abandonos se programan al llegar el auto. Si luego el auto sube
+        # al vagon, su evento queda obsoleto y se descarta al consultar el heap.
         while calendar and self.cars[calendar[0][1]].state != "En cola":
             heapq.heappop(calendar)
         return calendar[0][0] if calendar else None
@@ -186,13 +195,16 @@ class Simulation:
         result: List[str] = []
         queue = self.queues[stop]
         while queue and len(result) < limit:
+            # popleft implementa FIFO: se atiende primero al que llego primero.
             car_id = queue.popleft()
             car = self.cars[car_id]
             if car.state != "En cola":
                 continue
             car.state = "En viaje"
             car.board_time = self.clock
+            # Tiempo de espera individual = hora de subida - hora de llegada.
             car.wait_time = self._clean_time(self.clock - car.arrival_time)
+            # Se acumula para calcular la espera promedio de autos atendidos.
             self.wait_served += car.wait_time
             self.queue_counts[stop] -= 1
             self.boarded[stop] += 1
@@ -204,11 +216,16 @@ class Simulation:
             return {}
         origin = self.wagon_position
         queue_count = self.queue_counts[origin]
+        # Politica A: el vagon solo puede salir cuando completa su capacidad.
+        # Politica B no pasa por esta restriccion y puede salir parcialmente
+        # cargado o vacio.
         if self.policy == "A" and queue_count < self.config.capacity:
             return {}
 
+        # Se cargan como maximo "capacity" autos respetando el orden FIFO.
         load = self._board(origin, self.config.capacity)
         destination = 2 if origin == 1 else 1
+        # El enunciado fija 5 minutos con autos y 3 minutos si viaja vacio.
         duration = self.config.loaded_trip_time if load else self.config.empty_trip_time
 
         self.trip_count += 1
@@ -218,9 +235,12 @@ class Simulation:
         self.loaded_trip_count += int(bool(load))
         self.full_trip_count += int(len(load) == self.config.capacity)
         self.empty_trip_count += int(not load)
+        # Ingreso del viaje = autos que suben * tarifa por auto.
+        # Cada salida genera el costo completo, incluso una salida vacia.
         self.revenue += len(load) * self.config.fare_per_car
         self.operating_cost += self.config.cost_per_trip
 
+        # Fin de traslado = reloj actual + duracion correspondiente.
         arrival_time = self._clean_time(self.clock + duration)
         trip = {
             "id": trip_id,
@@ -254,6 +274,7 @@ class Simulation:
         for _ in range(quantity):
             self.stop_sequences[stop] += 1
             car_id = f"P{stop}-{self.stop_sequences[stop]:04d}"
+            # Limite de espera = hora de llegada + paciencia maxima (12 min).
             deadline = self._clean_time(self.clock + self.config.patience)
             car = Car(car_id, stop, self.clock, deadline)
             self.cars[car_id] = car
@@ -261,8 +282,11 @@ class Simulation:
             self.queue_counts[stop] += 1
             self.arrived[stop] += 1
             heapq.heappush(self.abandonment_calendars[stop], (deadline, car_id))
+            # Se agenda un evento individual para poder saber exactamente que
+            # auto abandona y conservar su tiempo de espera.
             self._schedule(deadline, "abandonment", car_id)
             created.append(car_id)
+        # Guarda la mayor cantidad simultanea observada en esta parada.
         self.max_queue[stop] = max(self.max_queue[stop], self.queue_counts[stop])
         return created
 
@@ -290,6 +314,9 @@ class Simulation:
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
         context = context or self._event_context()
+        # Cada fila de la tabla es una fotografia posterior al evento indicado.
+        # Por eso conserva todos los estados aunque en esa fila solo haya
+        # cambiado una llegada, un abandono o el vagon.
         queue_ids = {stop: self._valid_queue_ids(stop) for stop in (1, 2)}
         queue_detail: Dict[int, List[Dict[str, Any]]] = {}
         oldest_wait: Dict[int, float] = {}
@@ -298,6 +325,7 @@ class Simulation:
                 {
                     "id": car_id,
                     "arrival_time": self.cars[car_id].arrival_time,
+                    # Espera actual = reloj de la fila - llegada del auto.
                     "wait": self._clean_time(self.clock - self.cars[car_id].arrival_time),
                     "deadline": self.cars[car_id].deadline,
                 }
@@ -308,7 +336,14 @@ class Simulation:
             )
 
         elapsed = self.clock if self.clock > 0 else 0.0
+        # Resultado neto acumulado hasta esta fila.
         net_result = self.revenue - self.operating_cost - self.loss_cost
+        # Estos dos indicadores son parciales: usan el tiempo transcurrido hasta
+        # la fila actual, no el horizonte completo.
+        avg_queue_to_now = (
+            (self.queue_area[1] + self.queue_area[2]) / elapsed if elapsed else 0.0
+        )
+        utilization_to_now = self.wagon_busy_area / elapsed if elapsed else 0.0
         route = (
             f"P{self.wagon_origin} -> P{self.wagon_destination}"
             if self.wagon_state == "En viaje"
@@ -351,10 +386,8 @@ class Simulation:
             "acc_wait_served": self._clean_time(self.wait_served),
             "acc_wait_lost": self._clean_time(self.wait_lost),
             "queue_area": self._clean_time(self.queue_area[1] + self.queue_area[2]),
-            "avg_queue": self._clean_time(
-                (self.queue_area[1] + self.queue_area[2]) / elapsed
-            ) if elapsed else 0.0,
-            "wagon_utilization": self._clean_time(self.wagon_busy_area / elapsed) if elapsed else 0.0,
+            "avg_queue": self._clean_time(avg_queue_to_now),
+            "wagon_utilization": self._clean_time(utilization_to_now),
             "revenue": self._clean_time(self.revenue),
             "operating_cost": self._clean_time(self.operating_cost),
             "loss_cost": self._clean_time(self.loss_cost),
@@ -364,6 +397,8 @@ class Simulation:
 
     def _process_arrival(self, stop: int) -> None:
         context = self._event_context()
+        # La cantidad que llega es fija: 1 auto en P1 o un lote de 3 en P2
+        # con los parametros originales del enunciado.
         quantity = (
             self.config.arrival_batch_p1 if stop == 1 else self.config.arrival_batch_p2
         )
@@ -376,6 +411,8 @@ class Simulation:
             if stop == 1
             else self.config.arrival_interval_p2
         )
+        # No se usa una distribucion aleatoria. La proxima llegada se calcula
+        # sumando el intervalo deterministico al reloj actual.
         next_time = self._clean_time(self.clock + interval)
         self.next_arrival[stop] = next_time if next_time <= self.config.horizon + EPSILON else None
         if self.next_arrival[stop] is not None:
@@ -386,6 +423,8 @@ class Simulation:
             and self.wagon_position == stop
             and self.queue_counts[stop] >= self.config.capacity
         ):
+            # Si el vagon esta en esta parada y ya hay capacidad completa, se
+            # agenda la salida en el mismo instante, luego de las llegadas.
             self._schedule_dispatch(self.clock)
 
         noun = "auto" if quantity == 1 else "autos"
@@ -401,6 +440,8 @@ class Simulation:
             raise RuntimeError("Arribo de vagón inconsistente")
         context = self._event_context()
         delivered_ids = self.wagon_load.copy()
+        # Al finalizar el traslado, todos los autos que estaban en el vagon
+        # pasan de "En viaje" a "Entregado" en el mismo instante.
         for car_id in delivered_ids:
             car = self.cars[car_id]
             car.state = "Entregado"
@@ -422,6 +463,8 @@ class Simulation:
         self.wagon_departure = None
         self.wagon_arrival = None
 
+        # Politica B: siempre vuelve a salir, aunque no haya autos.
+        # Politica A: solo sale si en la nueva parada ya esperan 5 autos.
         if self.policy == "B" or self.queue_counts[destination] >= self.config.capacity:
             self._schedule_dispatch(self.clock)
 
@@ -434,6 +477,8 @@ class Simulation:
 
     def _process_dispatch(self) -> None:
         self.pending_dispatch_times.discard(self._clean_time(self.clock))
+        # _start_trip realiza juntos los calculos de carga, duracion, ingreso,
+        # costo y hora programada de llegada.
         trip = self._start_trip()
         if not trip:
             return
@@ -451,14 +496,18 @@ class Simulation:
 
     def _process_abandonment(self, car_id: str) -> None:
         car = self.cars[car_id]
+        # El evento puede seguir en el calendario aunque el auto ya haya sido
+        # cargado. En ese caso no corresponde registrar una perdida.
         if car.state != "En cola":
             return
         stop = car.stop
         car.state = "Perdido"
         car.lost_time = self.clock
+        # Espera del perdido = hora de abandono - hora de llegada.
         car.wait_time = self._clean_time(self.clock - car.arrival_time)
         self.queue_counts[stop] -= 1
         self.lost[stop] += 1
+        # Acumuladores usados para la espera promedio de perdidos y el costo.
         self.wait_lost += car.wait_time
         self.loss_cost += self.config.loss_per_abandoned_car
         context = self._event_context()
@@ -473,6 +522,8 @@ class Simulation:
 
     def run(self) -> Dict[str, Any]:
         self.config.validate()
+        # La primera llegada no ocurre en t=0: se agenda al completar el primer
+        # intervalo, es decir t=1 para P1 y t=5 para P2.
         self._schedule(self.config.arrival_interval_p1, "arrival_p1")
         self._schedule(self.config.arrival_interval_p2, "arrival_p2")
         self._schedule(self.config.horizon, "horizon")
@@ -483,13 +534,20 @@ class Simulation:
             "Vagón libre en P1; colas vacías",
         )
         if self.policy == "B":
+            # Criterio de inicializacion adoptado: la operacion continua de B
+            # comienza en t=0. Como las colas estan vacias, el primer viaje es
+            # vacio desde P1 hacia P2.
             self._schedule_dispatch(0.0)
 
         processed = 0
         while self.events:
+            # Extrae siempre el evento con menor tiempo. Si hay empate, el heap
+            # usa EVENT_PRIORITY: arribo del vagon, llegadas, despacho, abandono.
             time, _, _, kind, payload = heapq.heappop(self.events)
             if time > self.config.horizon + EPSILON:
                 break
+            # Las areas deben actualizarse antes de modificar colas o estados,
+            # usando el estado que estuvo vigente desde el evento anterior.
             self._update_time_areas(time)
             self.clock = time
             if kind == "arrival_p1":
@@ -511,17 +569,35 @@ class Simulation:
                 break
             processed += 1
             if processed > 1_000_000:
-                    raise RuntimeError("Se excedió el límite de eventos")
+                raise RuntimeError("Se excedió el límite de eventos")
 
         return self._result()
 
     def _result(self) -> Dict[str, Any]:
+        # Clasificacion final de autos para comprobar la conservacion:
+        # llegados = entregados + en viaje + en cola + perdidos.
         waiting = sum(1 for car in self.cars.values() if car.state == "En cola")
         in_transit = sum(1 for car in self.cars.values() if car.state == "En viaje")
         boarded_total = self.boarded[1] + self.boarded[2]
         lost_total = self.lost[1] + self.lost[2]
         total_arrivals = self.arrived[1] + self.arrived[2]
+
+        # Formulas economicas finales.
         net_result = self.revenue - self.operating_cost - self.loss_cost
+
+        # Promedio de espera atendidos = suma de esperas / autos que subieron.
+        avg_wait_boarded = self.wait_served / boarded_total if boarded_total else 0.0
+        # Promedio de espera perdidos = suma de esperas / autos perdidos.
+        avg_wait_lost = self.wait_lost / lost_total if lost_total else 0.0
+        # Longitud promedio de cola = integral de la cola / horizonte.
+        avg_queue_p1 = self.queue_area[1] / self.config.horizon
+        avg_queue_p2 = self.queue_area[2] / self.config.horizon
+        avg_queue_total = (self.queue_area[1] + self.queue_area[2]) / self.config.horizon
+        # Utilizacion = minutos viajando / duracion total de la simulacion.
+        wagon_utilization = self.wagon_busy_area / self.config.horizon
+        # Tasa de perdida = autos perdidos / total de autos llegados.
+        loss_rate = lost_total / total_arrivals if total_arrivals else 0.0
+
         summary = {
             "policy": self.policy,
             "policy_name": (
@@ -549,30 +625,22 @@ class Simulation:
             "operating_cost": self._clean_time(self.operating_cost),
             "loss_cost": self._clean_time(self.loss_cost),
             "net_result": self._clean_time(net_result),
-            "avg_wait_boarded": self._clean_time(self.wait_served / boarded_total)
-            if boarded_total
-            else 0.0,
-            "avg_wait_lost": self._clean_time(self.wait_lost / lost_total)
-            if lost_total
-            else 0.0,
-            "avg_queue_p1": self._clean_time(self.queue_area[1] / self.config.horizon),
-            "avg_queue_p2": self._clean_time(self.queue_area[2] / self.config.horizon),
-            "avg_queue_total": self._clean_time(
-                (self.queue_area[1] + self.queue_area[2]) / self.config.horizon
-            ),
+            "avg_wait_boarded": self._clean_time(avg_wait_boarded),
+            "avg_wait_lost": self._clean_time(avg_wait_lost),
+            "avg_queue_p1": self._clean_time(avg_queue_p1),
+            "avg_queue_p2": self._clean_time(avg_queue_p2),
+            "avg_queue_total": self._clean_time(avg_queue_total),
             "max_queue_p1": self.max_queue[1],
             "max_queue_p2": self.max_queue[2],
-            "wagon_utilization": self._clean_time(
-                self.wagon_busy_area / self.config.horizon
-            ),
-            "loss_rate": self._clean_time(lost_total / total_arrivals)
-            if total_arrivals
-            else 0.0,
+            "wagon_utilization": self._clean_time(wagon_utilization),
+            "loss_rate": self._clean_time(loss_rate),
             "event_rows": len(self.rows),
         }
         cars = []
         for car in self.cars.values():
             item = asdict(car)
+            # Para un auto que termina aun en cola, la espera visible es
+            # horizonte - llegada. Para los demas ya fue fijada al subir o salir.
             item["current_wait"] = (
                 car.wait_time
                 if car.wait_time is not None
