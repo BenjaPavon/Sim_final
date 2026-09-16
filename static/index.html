@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador de colas - Cruce sobre el río</title>
+  <meta name="description" content="Simulación de eventos discretos de las políticas del cruce ferroviario.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b413b'/%3E%3Cpath d='M14 21h36M14 32h28M14 43h20' stroke='%23d9f06f' stroke-width='7'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div>
+      <p class="eyebrow">SIMULACIÓN · EJERCICIO 34</p>
+      <h1>Cruce sobre el río</h1>
+    </div>
+    <div class="topbar-actions">
+      <span id="statusBadge" class="status-badge">Preparando simulación</span>
+      <button id="openMethod" class="button ghost" type="button">Criterios del modelo</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero-panel">
+      <div>
+        <p class="section-kicker">VECTOR DE ESTADO PROGRAMABLE</p>
+        <h2>Cada evento, cada cola, cada auto.</h2>
+        <p class="hero-copy">Compare las dos políticas durante 480 minutos. La traza conserva el reloj, el calendario de eventos, el estado del vagón, las colas FIFO y los acumuladores económicos.</p>
+      </div>
+      <div class="hero-route" aria-label="Esquema de las dos paradas">
+        <div class="stop-node"><b>P1</b><span>1 auto/min</span></div>
+        <div class="track"><span id="wagonIcon">VAGÓN · 5</span></div>
+        <div class="stop-node"><b>P2</b><span>3 autos/5 min</span></div>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="control-panel">
+        <div class="panel-title">
+          <div>
+            <p class="section-kicker">PARAMETROS</p>
+            <h2>Escenario</h2>
+          </div>
+          <button id="resetConfig" class="icon-button" title="Restaurar valores" type="button">↺</button>
+        </div>
+        <form id="configForm">
+          <fieldset>
+            <legend>Operacion</legend>
+            <label>Horizonte (min)<input name="horizon" type="number" min="1" step="1" value="480"></label>
+            <label>Capacidad del vagón<input name="capacity" type="number" min="1" step="1" value="5"></label>
+            <label>Viaje con carga (min)<input name="loaded_trip_time" type="number" min="0.01" step="0.1" value="5"></label>
+            <label>Viaje vacío (min)<input name="empty_trip_time" type="number" min="0.01" step="0.1" value="3"></label>
+            <label>Espera maxima (min)<input name="patience" type="number" min="0.01" step="0.1" value="12"></label>
+          </fieldset>
+          <fieldset>
+            <legend>Llegadas determinísticas</legend>
+            <div class="paired-inputs">
+              <label>P1 · lote<input name="arrival_batch_p1" type="number" min="1" step="1" value="1"></label>
+              <label>P1 · cada<input name="arrival_interval_p1" type="number" min="0.01" step="0.1" value="1"></label>
+            </div>
+            <div class="paired-inputs">
+              <label>P2 · lote<input name="arrival_batch_p2" type="number" min="1" step="1" value="3"></label>
+              <label>P2 · cada<input name="arrival_interval_p2" type="number" min="0.01" step="0.1" value="5"></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Economia ($)</legend>
+            <label>Ingreso por auto<input name="fare_per_car" type="number" min="0" step="0.1" value="2"></label>
+            <label>Costo por traslado<input name="cost_per_trip" type="number" min="0" step="0.1" value="6"></label>
+            <label>Pérdida por abandono<input name="loss_per_abandoned_car" type="number" min="0" step="0.1" value="1"></label>
+          </fieldset>
+          <button class="button primary full" type="submit"><span>▶</span> Simular ambas políticas</button>
+        </form>
+      </aside>
+
+      <div class="results-column">
+        <section class="comparison-card" aria-labelledby="comparisonTitle">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">DECISION</p>
+              <h2 id="comparisonTitle">Comparación de políticas</h2>
+            </div>
+            <div id="recommendation" class="recommendation">Calculando...</div>
+          </div>
+          <div id="comparisonGrid" class="comparison-grid skeleton-block"></div>
+        </section>
+
+        <section class="trace-card">
+          <div class="trace-toolbar">
+            <div class="segmented" role="tablist" aria-label="Política">
+              <button class="policy-tab active" data-policy="A" type="button"><span>A</span> Espera 5 autos</button>
+              <button class="policy-tab" data-policy="B" type="button"><span>B</span> Sale siempre</button>
+            </div>
+            <div class="view-tabs" role="tablist" aria-label="Vista">
+              <button class="view-tab active" data-view="rows" type="button">Vector de estado</button>
+              <button class="view-tab" data-view="cars" type="button">Autos</button>
+              <button class="view-tab" data-view="trips" type="button">Traslados</button>
+            </div>
+          </div>
+
+          <div id="metricCards" class="metric-cards"></div>
+
+          <div class="filterbar">
+            <label>Desde min <input id="timeFrom" type="number" min="0" step="1" value="0"></label>
+            <label>Hasta min <input id="timeTo" type="number" min="0" step="1" value="480"></label>
+            <label id="eventFilterWrap">Evento
+              <select id="eventFilter">
+                <option value="all">Todos</option>
+                <option value="initialization">Inicialización</option>
+                <option value="arrival_p1">Llegada P1</option>
+                <option value="arrival_p2">Llegada P2</option>
+                <option value="wagon_arrival">Fin traslado</option>
+                <option value="dispatch">Inicio traslado</option>
+                <option value="abandonment">Abandono</option>
+                <option value="horizon">Fin</option>
+              </select>
+            </label>
+            <label id="stateFilterWrap" class="hidden">Estado
+              <select id="stateFilter"><option value="all">Todos</option><option>En cola</option><option>En viaje</option><option>Entregado</option><option>Perdido</option></select>
+            </label>
+            <div class="filter-actions">
+              <span id="rowCount">0 filas</span>
+            </div>
+          </div>
+
+          <div id="tableNotice" class="table-notice">Cargando datos...</div>
+          <div class="table-shell">
+            <table id="dataTable" aria-label="Vector de estado de la simulación"></table>
+          </div>
+          <div class="pagination">
+            <button id="previousPage" class="icon-button" type="button" aria-label="Página anterior">←</button>
+            <span id="pageLabel">Página 1 de 1</span>
+            <button id="nextPage" class="icon-button" type="button" aria-label="Página siguiente">→</button>
+          </div>
+          <div id="rowDetail" class="row-detail hidden"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="methodDialog">
+    <div class="dialog-header">
+      <div><p class="section-kicker">SUPUESTOS</p><h2>Criterios del modelo</h2></div>
+      <button id="closeMethod" class="icon-button" type="button" aria-label="Cerrar">×</button>
+    </div>
+    <ol id="assumptionList"></ol>
+    <div class="event-order">
+      <b>Prioridad en el mismo instante</b>
+      <span>1 · arribo del vagón</span><span>2 · llegadas</span><span>3 · despacho</span><span>4 · abandono</span>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js" defer></script>
+</body>
+</html>

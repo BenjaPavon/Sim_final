@@ -1,0 +1,647 @@
+"""Simulación determinística del cruce ferroviario del ejercicio 34.
+
+El módulo no depende de paquetes externos. Expone ``simulate`` para una política
+y ``simulate_both`` para comparar las dos alternativas del enunciado.
+"""
+
+from __future__ import annotations
+
+import heapq
+from collections import deque
+from dataclasses import asdict, dataclass
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+
+
+EPSILON = 1e-9
+
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    horizon: float = 480.0
+    capacity: int = 5
+    arrival_interval_p1: float = 1.0
+    arrival_batch_p1: int = 1
+    arrival_interval_p2: float = 5.0
+    arrival_batch_p2: int = 3
+    loaded_trip_time: float = 5.0
+    empty_trip_time: float = 3.0
+    patience: float = 12.0
+    fare_per_car: float = 2.0
+    cost_per_trip: float = 6.0
+    loss_per_abandoned_car: float = 1.0
+
+    @classmethod
+    def from_mapping(cls, values: Optional[Dict[str, Any]]) -> "SimulationConfig":
+        if not values:
+            return cls()
+        allowed = cls.__dataclass_fields__.keys()
+        clean = {key: values[key] for key in allowed if key in values}
+        integer_fields = {"capacity", "arrival_batch_p1", "arrival_batch_p2"}
+        for key in integer_fields:
+            if key in clean:
+                clean[key] = int(clean[key])
+        for key in set(clean) - integer_fields:
+            clean[key] = float(clean[key])
+        config = cls(**clean)
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        positive = {
+            "horizon": self.horizon,
+            "capacity": self.capacity,
+            "arrival_interval_p1": self.arrival_interval_p1,
+            "arrival_batch_p1": self.arrival_batch_p1,
+            "arrival_interval_p2": self.arrival_interval_p2,
+            "arrival_batch_p2": self.arrival_batch_p2,
+            "loaded_trip_time": self.loaded_trip_time,
+            "empty_trip_time": self.empty_trip_time,
+            "patience": self.patience,
+        }
+        invalid = [name for name, value in positive.items() if value <= 0]
+        if invalid:
+            raise ValueError("Deben ser positivos: " + ", ".join(invalid))
+        if self.horizon > 100_000:
+            raise ValueError("El horizonte maximo admitido es 100000 minutos")
+        for name in ("fare_per_car", "cost_per_trip", "loss_per_abandoned_car"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} no puede ser negativo")
+
+
+@dataclass
+class Car:
+    id: str
+    stop: int
+    arrival_time: float
+    deadline: float
+    state: str = "En cola"
+    board_time: Optional[float] = None
+    wait_time: Optional[float] = None
+    delivered_time: Optional[float] = None
+    lost_time: Optional[float] = None
+    trip_id: Optional[int] = None
+
+
+EVENT_PRIORITY = {
+    "wagon_arrival": 10,
+    "arrival_p1": 20,
+    "arrival_p2": 21,
+    "dispatch": 30,
+    # A los 12 minutos exactos el auto aun puede subir: el abandono se
+    # procesa despues de arribos y despacho simultaneos.
+    "abandonment": 40,
+    "horizon": 99,
+}
+
+
+class Simulation:
+    def __init__(self, policy: str, config: SimulationConfig):
+        if policy not in {"A", "B"}:
+            raise ValueError("La política debe ser A o B")
+        self.policy = policy
+        self.config = config
+        self.clock = 0.0
+        self.last_clock = 0.0
+        self.sequence = 0
+        self.events: List[Tuple[float, int, int, str, Any]] = []
+        self.pending_dispatch_times: set[float] = set()
+
+        self.queues: Dict[int, Deque[str]] = {1: deque(), 2: deque()}
+        self.queue_counts = {1: 0, 2: 0}
+        self.abandonment_calendars: Dict[int, List[Tuple[float, str]]] = {1: [], 2: []}
+        self.cars: Dict[str, Car] = {}
+        self.stop_sequences = {1: 0, 2: 0}
+
+        self.wagon_state = "Libre"
+        self.wagon_position: Optional[int] = 1
+        self.wagon_origin: Optional[int] = None
+        self.wagon_destination: Optional[int] = None
+        self.wagon_load: List[str] = []
+        self.wagon_trip_id: Optional[int] = None
+        self.wagon_departure: Optional[float] = None
+        self.wagon_arrival: Optional[float] = None
+
+        self.trips: List[Dict[str, Any]] = []
+        self.rows: List[Dict[str, Any]] = []
+        self.arrived = {1: 0, 2: 0}
+        self.boarded = {1: 0, 2: 0}
+        self.delivered = 0
+        self.lost = {1: 0, 2: 0}
+        self.trip_count = 0
+        self.loaded_trip_count = 0
+        self.full_trip_count = 0
+        self.empty_trip_count = 0
+        self.revenue = 0.0
+        self.operating_cost = 0.0
+        self.loss_cost = 0.0
+        self.wait_served = 0.0
+        self.wait_lost = 0.0
+        self.queue_area = {1: 0.0, 2: 0.0}
+        self.wagon_busy_area = 0.0
+        self.max_queue = {1: 0, 2: 0}
+        self.next_arrival = {
+            1: config.arrival_interval_p1,
+            2: config.arrival_interval_p2,
+        }
+
+    @staticmethod
+    def _clean_time(value: float) -> float:
+        return round(float(value), 9)
+
+    def _schedule(self, time: float, kind: str, payload: Any = None) -> None:
+        time = self._clean_time(time)
+        self.sequence += 1
+        heapq.heappush(
+            self.events,
+            (time, EVENT_PRIORITY[kind], self.sequence, kind, payload),
+        )
+
+    def _schedule_dispatch(self, time: float) -> None:
+        key = self._clean_time(time)
+        if key not in self.pending_dispatch_times:
+            self.pending_dispatch_times.add(key)
+            self._schedule(key, "dispatch")
+
+    def _update_time_areas(self, new_time: float) -> None:
+        delta = new_time - self.last_clock
+        if delta < -EPSILON:
+            raise RuntimeError("El calendario de eventos retrocedió en el tiempo")
+        if delta > 0:
+            for stop in (1, 2):
+                self.queue_area[stop] += self.queue_counts[stop] * delta
+            if self.wagon_state == "En viaje":
+                self.wagon_busy_area += delta
+        self.last_clock = new_time
+
+    def _valid_queue_ids(self, stop: int) -> List[str]:
+        return [car_id for car_id in self.queues[stop] if self.cars[car_id].state == "En cola"]
+
+    def _next_abandonment(self, stop: int) -> Optional[float]:
+        calendar = self.abandonment_calendars[stop]
+        while calendar and self.cars[calendar[0][1]].state != "En cola":
+            heapq.heappop(calendar)
+        return calendar[0][0] if calendar else None
+
+    def _board(self, stop: int, limit: int) -> List[str]:
+        result: List[str] = []
+        queue = self.queues[stop]
+        while queue and len(result) < limit:
+            car_id = queue.popleft()
+            car = self.cars[car_id]
+            if car.state != "En cola":
+                continue
+            car.state = "En viaje"
+            car.board_time = self.clock
+            car.wait_time = self._clean_time(self.clock - car.arrival_time)
+            self.wait_served += car.wait_time
+            self.queue_counts[stop] -= 1
+            self.boarded[stop] += 1
+            result.append(car_id)
+        return result
+
+    def _start_trip(self) -> Dict[str, Any]:
+        if self.wagon_state != "Libre" or self.wagon_position not in (1, 2):
+            return {}
+        origin = self.wagon_position
+        queue_count = self.queue_counts[origin]
+        if self.policy == "A" and queue_count < self.config.capacity:
+            return {}
+
+        load = self._board(origin, self.config.capacity)
+        destination = 2 if origin == 1 else 1
+        duration = self.config.loaded_trip_time if load else self.config.empty_trip_time
+
+        self.trip_count += 1
+        trip_id = self.trip_count
+        for car_id in load:
+            self.cars[car_id].trip_id = trip_id
+        self.loaded_trip_count += int(bool(load))
+        self.full_trip_count += int(len(load) == self.config.capacity)
+        self.empty_trip_count += int(not load)
+        self.revenue += len(load) * self.config.fare_per_car
+        self.operating_cost += self.config.cost_per_trip
+
+        arrival_time = self._clean_time(self.clock + duration)
+        trip = {
+            "id": trip_id,
+            "origin": origin,
+            "destination": destination,
+            "departure_time": self.clock,
+            "arrival_time": arrival_time,
+            "duration": duration,
+            "load_count": len(load),
+            "car_ids": load.copy(),
+            "kind": "Con carga" if load else "Vacío",
+            "revenue": len(load) * self.config.fare_per_car,
+            "cost": self.config.cost_per_trip,
+            "completed": False,
+        }
+        self.trips.append(trip)
+
+        self.wagon_state = "En viaje"
+        self.wagon_position = None
+        self.wagon_origin = origin
+        self.wagon_destination = destination
+        self.wagon_load = load.copy()
+        self.wagon_trip_id = trip_id
+        self.wagon_departure = self.clock
+        self.wagon_arrival = arrival_time
+        self._schedule(arrival_time, "wagon_arrival", trip_id)
+        return trip
+
+    def _arrive_cars(self, stop: int, quantity: int) -> List[str]:
+        created: List[str] = []
+        for _ in range(quantity):
+            self.stop_sequences[stop] += 1
+            car_id = f"P{stop}-{self.stop_sequences[stop]:04d}"
+            deadline = self._clean_time(self.clock + self.config.patience)
+            car = Car(car_id, stop, self.clock, deadline)
+            self.cars[car_id] = car
+            self.queues[stop].append(car_id)
+            self.queue_counts[stop] += 1
+            self.arrived[stop] += 1
+            heapq.heappush(self.abandonment_calendars[stop], (deadline, car_id))
+            self._schedule(deadline, "abandonment", car_id)
+            created.append(car_id)
+        self.max_queue[stop] = max(self.max_queue[stop], self.queue_counts[stop])
+        return created
+
+    def _event_context(self) -> Dict[str, Any]:
+        return {
+            "arrivals_now_p1": 0,
+            "arrivals_now_p2": 0,
+            "arrived_ids": [],
+            "loaded_now": 0,
+            "loaded_ids": [],
+            "delivered_now": 0,
+            "delivered_ids": [],
+            "abandoned_now_p1": 0,
+            "abandoned_now_p2": 0,
+            "abandoned_ids": [],
+            "trip_started_id": None,
+            "trip_finished_id": None,
+        }
+
+    def _snapshot(
+        self,
+        event_type: str,
+        event: str,
+        details: str = "",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        context = context or self._event_context()
+        queue_ids = {stop: self._valid_queue_ids(stop) for stop in (1, 2)}
+        queue_detail: Dict[int, List[Dict[str, Any]]] = {}
+        oldest_wait: Dict[int, float] = {}
+        for stop in (1, 2):
+            queue_detail[stop] = [
+                {
+                    "id": car_id,
+                    "arrival_time": self.cars[car_id].arrival_time,
+                    "wait": self._clean_time(self.clock - self.cars[car_id].arrival_time),
+                    "deadline": self.cars[car_id].deadline,
+                }
+                for car_id in queue_ids[stop]
+            ]
+            oldest_wait[stop] = max(
+                (item["wait"] for item in queue_detail[stop]), default=0.0
+            )
+
+        elapsed = self.clock if self.clock > 0 else 0.0
+        net_result = self.revenue - self.operating_cost - self.loss_cost
+        route = (
+            f"P{self.wagon_origin} -> P{self.wagon_destination}"
+            if self.wagon_state == "En viaje"
+            else "-"
+        )
+        row = {
+            "row": len(self.rows),
+            "event_type": event_type,
+            "event": event,
+            "details": details,
+            "time": self.clock,
+            **context,
+            "next_arrival_p1": self.next_arrival[1],
+            "next_arrival_p2": self.next_arrival[2],
+            "next_abandon_p1": self._next_abandonment(1),
+            "next_abandon_p2": self._next_abandonment(2),
+            "wagon_state": self.wagon_state,
+            "wagon_location": f"P{self.wagon_position}" if self.wagon_position else "En río",
+            "wagon_route": route,
+            "wagon_trip_id": self.wagon_trip_id,
+            "wagon_load_count": len(self.wagon_load),
+            "wagon_load_ids": self.wagon_load.copy(),
+            "trip_departure": self.wagon_departure,
+            "next_wagon_arrival": self.wagon_arrival,
+            "queue_p1_count": self.queue_counts[1],
+            "queue_p1": queue_detail[1],
+            "oldest_wait_p1": oldest_wait[1],
+            "queue_p2_count": self.queue_counts[2],
+            "queue_p2": queue_detail[2],
+            "oldest_wait_p2": oldest_wait[2],
+            "arrived_p1": self.arrived[1],
+            "arrived_p2": self.arrived[2],
+            "boarded_p1": self.boarded[1],
+            "boarded_p2": self.boarded[2],
+            "delivered_total": self.delivered,
+            "lost_p1": self.lost[1],
+            "lost_p2": self.lost[2],
+            "trips_total": self.trip_count,
+            "trips_empty": self.empty_trip_count,
+            "acc_wait_served": self._clean_time(self.wait_served),
+            "acc_wait_lost": self._clean_time(self.wait_lost),
+            "queue_area": self._clean_time(self.queue_area[1] + self.queue_area[2]),
+            "avg_queue": self._clean_time(
+                (self.queue_area[1] + self.queue_area[2]) / elapsed
+            ) if elapsed else 0.0,
+            "wagon_utilization": self._clean_time(self.wagon_busy_area / elapsed) if elapsed else 0.0,
+            "revenue": self._clean_time(self.revenue),
+            "operating_cost": self._clean_time(self.operating_cost),
+            "loss_cost": self._clean_time(self.loss_cost),
+            "net_result": self._clean_time(net_result),
+        }
+        self.rows.append(row)
+
+    def _process_arrival(self, stop: int) -> None:
+        context = self._event_context()
+        quantity = (
+            self.config.arrival_batch_p1 if stop == 1 else self.config.arrival_batch_p2
+        )
+        created = self._arrive_cars(stop, quantity)
+        context[f"arrivals_now_p{stop}"] = quantity
+        context["arrived_ids"] = created
+
+        interval = (
+            self.config.arrival_interval_p1
+            if stop == 1
+            else self.config.arrival_interval_p2
+        )
+        next_time = self._clean_time(self.clock + interval)
+        self.next_arrival[stop] = next_time if next_time <= self.config.horizon + EPSILON else None
+        if self.next_arrival[stop] is not None:
+            self._schedule(next_time, f"arrival_p{stop}")
+
+        if (
+            self.wagon_state == "Libre"
+            and self.wagon_position == stop
+            and self.queue_counts[stop] >= self.config.capacity
+        ):
+            self._schedule_dispatch(self.clock)
+
+        noun = "auto" if quantity == 1 else "autos"
+        self._snapshot(
+            f"arrival_p{stop}",
+            f"Llegada de {quantity} {noun} a P{stop}",
+            ", ".join(created),
+            context,
+        )
+
+    def _process_wagon_arrival(self, trip_id: int) -> None:
+        if self.wagon_trip_id != trip_id:
+            raise RuntimeError("Arribo de vagón inconsistente")
+        context = self._event_context()
+        delivered_ids = self.wagon_load.copy()
+        for car_id in delivered_ids:
+            car = self.cars[car_id]
+            car.state = "Entregado"
+            car.delivered_time = self.clock
+        self.delivered += len(delivered_ids)
+        self.trips[trip_id - 1]["completed"] = True
+        context["delivered_now"] = len(delivered_ids)
+        context["delivered_ids"] = delivered_ids
+        context["trip_finished_id"] = trip_id
+
+        destination = self.wagon_destination
+        origin = self.wagon_origin
+        self.wagon_state = "Libre"
+        self.wagon_position = destination
+        self.wagon_origin = None
+        self.wagon_destination = None
+        self.wagon_load = []
+        self.wagon_trip_id = None
+        self.wagon_departure = None
+        self.wagon_arrival = None
+
+        if self.policy == "B" or self.queue_counts[destination] >= self.config.capacity:
+            self._schedule_dispatch(self.clock)
+
+        self._snapshot(
+            "wagon_arrival",
+            f"Fin traslado {trip_id}: P{origin} -> P{destination}",
+            f"Descarga: {len(delivered_ids)} auto(s)",
+            context,
+        )
+
+    def _process_dispatch(self) -> None:
+        self.pending_dispatch_times.discard(self._clean_time(self.clock))
+        trip = self._start_trip()
+        if not trip:
+            return
+        context = self._event_context()
+        context["loaded_now"] = trip["load_count"]
+        context["loaded_ids"] = trip["car_ids"].copy()
+        context["trip_started_id"] = trip["id"]
+        qualifier = "vacío" if trip["load_count"] == 0 else f"con {trip['load_count']} auto(s)"
+        self._snapshot(
+            "dispatch",
+            f"Inicio traslado {trip['id']}: P{trip['origin']} -> P{trip['destination']}",
+            f"Sale {qualifier}; arribo previsto {trip['arrival_time']:.2f}",
+            context,
+        )
+
+    def _process_abandonment(self, car_id: str) -> None:
+        car = self.cars[car_id]
+        if car.state != "En cola":
+            return
+        stop = car.stop
+        car.state = "Perdido"
+        car.lost_time = self.clock
+        car.wait_time = self._clean_time(self.clock - car.arrival_time)
+        self.queue_counts[stop] -= 1
+        self.lost[stop] += 1
+        self.wait_lost += car.wait_time
+        self.loss_cost += self.config.loss_per_abandoned_car
+        context = self._event_context()
+        context[f"abandoned_now_p{stop}"] = 1
+        context["abandoned_ids"] = [car_id]
+        self._snapshot(
+            "abandonment",
+            f"Abandono {car_id} en P{stop}",
+            f"Espera alcanzada: {car.wait_time:.2f} min",
+            context,
+        )
+
+    def run(self) -> Dict[str, Any]:
+        self.config.validate()
+        self._schedule(self.config.arrival_interval_p1, "arrival_p1")
+        self._schedule(self.config.arrival_interval_p2, "arrival_p2")
+        self._schedule(self.config.horizon, "horizon")
+
+        self._snapshot(
+            "initialization",
+            "Inicialización",
+            "Vagón libre en P1; colas vacías",
+        )
+        if self.policy == "B":
+            self._schedule_dispatch(0.0)
+
+        processed = 0
+        while self.events:
+            time, _, _, kind, payload = heapq.heappop(self.events)
+            if time > self.config.horizon + EPSILON:
+                break
+            self._update_time_areas(time)
+            self.clock = time
+            if kind == "arrival_p1":
+                self._process_arrival(1)
+            elif kind == "arrival_p2":
+                self._process_arrival(2)
+            elif kind == "wagon_arrival":
+                self._process_wagon_arrival(int(payload))
+            elif kind == "dispatch":
+                self._process_dispatch()
+            elif kind == "abandonment":
+                self._process_abandonment(str(payload))
+            elif kind == "horizon":
+                self._snapshot(
+                    "horizon",
+                    "Fin de simulación",
+                    f"Horizonte de {self.config.horizon:g} minutos",
+                )
+                break
+            processed += 1
+            if processed > 1_000_000:
+                    raise RuntimeError("Se excedió el límite de eventos")
+
+        return self._result()
+
+    def _result(self) -> Dict[str, Any]:
+        waiting = sum(1 for car in self.cars.values() if car.state == "En cola")
+        in_transit = sum(1 for car in self.cars.values() if car.state == "En viaje")
+        boarded_total = self.boarded[1] + self.boarded[2]
+        lost_total = self.lost[1] + self.lost[2]
+        total_arrivals = self.arrived[1] + self.arrived[2]
+        net_result = self.revenue - self.operating_cost - self.loss_cost
+        summary = {
+            "policy": self.policy,
+            "policy_name": (
+                "Espera completar 5 autos"
+                if self.policy == "A"
+                else "Sale siempre al finalizar cada traslado"
+            ),
+            "arrivals_total": total_arrivals,
+            "arrivals_p1": self.arrived[1],
+            "arrivals_p2": self.arrived[2],
+            "boarded_total": boarded_total,
+            "boarded_p1": self.boarded[1],
+            "boarded_p2": self.boarded[2],
+            "delivered_total": self.delivered,
+            "waiting_at_end": waiting,
+            "in_transit_at_end": in_transit,
+            "lost_total": lost_total,
+            "lost_p1": self.lost[1],
+            "lost_p2": self.lost[2],
+            "trips_total": self.trip_count,
+            "trips_loaded": self.loaded_trip_count,
+            "trips_full": self.full_trip_count,
+            "trips_empty": self.empty_trip_count,
+            "revenue": self._clean_time(self.revenue),
+            "operating_cost": self._clean_time(self.operating_cost),
+            "loss_cost": self._clean_time(self.loss_cost),
+            "net_result": self._clean_time(net_result),
+            "avg_wait_boarded": self._clean_time(self.wait_served / boarded_total)
+            if boarded_total
+            else 0.0,
+            "avg_wait_lost": self._clean_time(self.wait_lost / lost_total)
+            if lost_total
+            else 0.0,
+            "avg_queue_p1": self._clean_time(self.queue_area[1] / self.config.horizon),
+            "avg_queue_p2": self._clean_time(self.queue_area[2] / self.config.horizon),
+            "avg_queue_total": self._clean_time(
+                (self.queue_area[1] + self.queue_area[2]) / self.config.horizon
+            ),
+            "max_queue_p1": self.max_queue[1],
+            "max_queue_p2": self.max_queue[2],
+            "wagon_utilization": self._clean_time(
+                self.wagon_busy_area / self.config.horizon
+            ),
+            "loss_rate": self._clean_time(lost_total / total_arrivals)
+            if total_arrivals
+            else 0.0,
+            "event_rows": len(self.rows),
+        }
+        cars = []
+        for car in self.cars.values():
+            item = asdict(car)
+            item["current_wait"] = (
+                car.wait_time
+                if car.wait_time is not None
+                else self._clean_time(self.config.horizon - car.arrival_time)
+            )
+            item["system_time"] = (
+                self._clean_time(car.delivered_time - car.arrival_time)
+                if car.delivered_time is not None
+                else None
+            )
+            cars.append(item)
+        return {
+            "policy": self.policy,
+            "summary": summary,
+            "rows": self.rows,
+            "cars": cars,
+            "trips": self.trips,
+        }
+
+
+def simulate(policy: str, config: Optional[SimulationConfig] = None) -> Dict[str, Any]:
+    return Simulation(policy, config or SimulationConfig()).run()
+
+
+def simulate_both(values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    config = SimulationConfig.from_mapping(values)
+    results = {policy: simulate(policy, config) for policy in ("A", "B")}
+    best = max(results, key=lambda key: results[key]["summary"]["net_result"])
+    return {
+        "config": asdict(config),
+        "policies": results,
+        "recommended_policy": best,
+        "comparison_basis": "Mayor resultado neto = ingresos - costos de traslados - pérdidas por abandono",
+        "assumptions": [
+            "Las llegadas son determinísticas: la primera ocurre al completar cada intervalo.",
+            "Los autos se atienden FIFO en cada parada.",
+            "Un auto puede subir con 12 minutos exactos de espera; si no sube, abandona en ese instante.",
+            "En eventos simultáneos se procesa: arribo del vagón, llegadas de autos, despacho y abandono.",
+            "La política B inicia en t=0 con un traslado vacío desde P1.",
+            "Los eventos ocurridos exactamente en el minuto final se incluyen.",
+            "El ingreso se registra al subir el auto y el costo al iniciar cada traslado, incluso si queda en viaje al cierre.",
+        ],
+    }
+
+
+def compact_summary(result: Dict[str, Any]) -> Iterable[Tuple[str, Any, Any]]:
+    """Ayuda de consola: produce filas comparativas A/B."""
+    left = result["policies"]["A"]["summary"]
+    right = result["policies"]["B"]["summary"]
+    for key in (
+        "arrivals_total",
+        "boarded_total",
+        "delivered_total",
+        "lost_total",
+        "trips_total",
+        "trips_empty",
+        "avg_wait_boarded",
+        "avg_queue_total",
+        "revenue",
+        "operating_cost",
+        "loss_cost",
+        "net_result",
+    ):
+        yield key, left[key], right[key]
+
+
+if __name__ == "__main__":
+    comparison = simulate_both()
+    print("Indicador\tPolítica A\tPolítica B")
+    for metric, value_a, value_b in compact_summary(comparison):
+        print(f"{metric}\t{value_a}\t{value_b}")
+    print(f"Recomendación: política {comparison['recommended_policy']}")
