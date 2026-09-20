@@ -1,21 +1,80 @@
+import math
 import unittest
+from dataclasses import asdict
 
-from simulation import SimulationConfig, simulate, simulate_both
+from simulation import ArrivalSample, SimulationConfig, generate_arrivals, simulate, simulate_both
 
 
-class DefaultScenarioTests(unittest.TestCase):
+class ArrivalGenerationTests(unittest.TestCase):
+    def test_exponential_inverse_transform_and_individual_arrivals(self):
+        config = SimulationConfig(horizon=40, replications=1, seed=7)
+        paths = generate_arrivals(config, config.seed)
+        for stop, mean in ((1, 1.0), (2, 5.0 / 3.0)):
+            previous_time = 0.0
+            for sample in paths[stop]:
+                self.assertGreater(sample.time, previous_time)
+                self.assertGreaterEqual(sample.rnd, 0.0)
+                self.assertLess(sample.rnd, 1.0)
+                self.assertAlmostEqual(
+                    sample.interarrival, -mean * math.log1p(-sample.rnd), places=10
+                )
+                self.assertAlmostEqual(
+                    sample.time - previous_time, sample.interarrival, places=10
+                )
+                previous_time = sample.time
+            self.assertGreater(paths[stop][-1].time, config.horizon)
+
+    def test_seed_reproduces_both_arrival_streams(self):
+        config = SimulationConfig(horizon=40, replications=1, seed=7)
+        self.assertEqual(generate_arrivals(config, 7), generate_arrivals(config, 7))
+        self.assertNotEqual(generate_arrivals(config, 7), generate_arrivals(config, 8))
+
+    def test_config_rates_match_statement(self):
+        config = SimulationConfig()
+        self.assertEqual(config.arrival_count_p1 / config.arrival_window_p1, 1.0)
+        self.assertEqual(config.arrival_count_p2 / config.arrival_window_p2, 0.6)
+
+    def test_invalid_nonfinite_and_fractional_inputs_are_rejected(self):
+        for values in (
+            {"arrival_window_p2": float("nan")},
+            {"arrival_count_p1": float("inf")},
+            {"replications": 2.5},
+            {"seed": "3.5"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SimulationConfig.from_mapping(values)
+
+    def test_single_replication_has_no_confidence_interval(self):
+        result = simulate_both({"horizon": 20, "replications": 1, "seed": 7})
+        self.assertIsNone(result["comparison"]["net_difference_ci95"])
+        self.assertFalse(result["comparison"]["recommendation_confident"])
+
+
+class SimulationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.result = simulate_both()
+        cls.config = SimulationConfig(seed=12345, replications=12)
+        cls.result = simulate_both(asdict(cls.config))
 
-    def test_default_totals_and_recommendation(self):
-        self.assertEqual(self.result["recommended_policy"], "A")
-        summary_a = self.result["policies"]["A"]["summary"]
-        summary_b = self.result["policies"]["B"]["summary"]
-        self.assertEqual(summary_a["arrivals_total"], 768)
-        self.assertEqual(summary_b["arrivals_total"], 768)
-        self.assertEqual(summary_a["net_result"], 112.0)
-        self.assertEqual(summary_b["net_result"], 96.0)
+    def test_policies_receive_exactly_the_same_individual_arrivals(self):
+        arrivals = {}
+        for policy in ("A", "B"):
+            arrivals[policy] = [
+                (car["id"], car["stop"], car["arrival_time"])
+                for car in self.result["policies"][policy]["cars"]
+            ]
+        self.assertEqual(arrivals["A"], arrivals["B"])
+        self.assertTrue(all(row["arrivals_now_p2"] <= 1 for row in self.result["policies"]["A"]["rows"]))
+
+    def test_initial_row_exposes_rnd_time_and_next_arrival(self):
+        row = self.result["policies"]["A"]["rows"][0]
+        self.assertEqual(row["event_type"], "initialization")
+        self.assertAlmostEqual(row["interarrival_p1"], -math.log1p(-row["arrival_rnd_p1"]))
+        self.assertAlmostEqual(
+            row["interarrival_p2"], -(5 / 3) * math.log1p(-row["arrival_rnd_p2"])
+        )
+        self.assertAlmostEqual(row["next_arrival_p1"], row["interarrival_p1"])
+        self.assertAlmostEqual(row["next_arrival_p2"], row["interarrival_p2"])
 
     def test_flow_conservation(self):
         for policy in ("A", "B"):
@@ -55,8 +114,8 @@ class DefaultScenarioTests(unittest.TestCase):
             cars = self.result["policies"][policy]["cars"]
             served = [car for car in cars if car["board_time"] is not None]
             lost = [car for car in cars if car["state"] == "Perdido"]
-            self.assertTrue(all(car["wait_time"] <= patience for car in served))
-            self.assertTrue(all(car["wait_time"] == patience for car in lost))
+            self.assertTrue(all(car["wait_time"] <= patience + 1e-9 for car in served))
+            self.assertTrue(all(abs(car["wait_time"] - patience) < 1e-8 for car in lost))
             for stop in (1, 2):
                 boarded = [car for car in served if car["stop"] == stop]
                 arrivals = [car["arrival_time"] for car in boarded]
@@ -70,21 +129,39 @@ class DefaultScenarioTests(unittest.TestCase):
             self.assertEqual(rows[-1]["event_type"], "horizon")
             self.assertEqual(rows[-1]["time"], 480.0)
 
+    def test_comparison_uses_replicate_averages(self):
+        comparison = self.result["comparison"]
+        self.assertEqual(comparison["replications"], self.config.replications)
+        self.assertEqual(sum(comparison["winner_counts"].values()), self.config.replications)
+        mean_a = comparison["metrics"]["net_result"]["A"]
+        mean_b = comparison["metrics"]["net_result"]["B"]
+        self.assertAlmostEqual(mean_a - mean_b, comparison["net_difference_mean"])
+        self.assertEqual(len(comparison["net_difference_ci95"]), 2)
+
 
 class TieBreakingTests(unittest.TestCase):
     def test_car_can_board_at_exact_patience_limit(self):
         config = SimulationConfig(
             horizon=3,
             capacity=2,
-            arrival_interval_p1=1,
-            arrival_batch_p1=1,
-            arrival_interval_p2=100,
-            arrival_batch_p2=1,
-            loaded_trip_time=5,
-            empty_trip_time=3,
+            arrival_count_p1=1,
+            arrival_window_p1=1,
+            arrival_count_p2=1,
+            arrival_window_p2=100,
             patience=1,
+            replications=1,
         )
-        result = simulate("A", config)
+        # Trayectoria controlada: el segundo auto llega al mismo tiempo en que
+        # vence la paciencia del primero. El despacho precede al abandono.
+        arrivals = {
+            1: [
+                ArrivalSample(1.0, 1 - math.exp(-1), 1.0),
+                ArrivalSample(2.0, 1 - math.exp(-1), 1.0),
+                ArrivalSample(4.0, 1 - math.exp(-2), 2.0),
+            ],
+            2: [ArrivalSample(100.0, 1 - math.exp(-1), 100.0)],
+        }
+        result = simulate("A", config, arrivals)
         first = result["cars"][0]
         self.assertEqual(first["id"], "P1-0001")
         self.assertEqual(first["board_time"], 2.0)
@@ -92,7 +169,7 @@ class TieBreakingTests(unittest.TestCase):
         self.assertNotEqual(first["state"], "Perdido")
 
     def test_policy_b_starts_empty_at_zero(self):
-        result = simulate("B", SimulationConfig(horizon=4))
+        result = simulate("B", SimulationConfig(horizon=4, replications=1))
         first_trip = result["trips"][0]
         self.assertEqual(first_trip["departure_time"], 0.0)
         self.assertEqual(first_trip["origin"], 1)

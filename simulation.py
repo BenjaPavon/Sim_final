@@ -1,4 +1,4 @@
-"""Simulación determinística del cruce ferroviario del ejercicio 34.
+"""Simulación estocástica del cruce ferroviario del ejercicio 34.
 
 El módulo no depende de paquetes externos. Expone ``simulate`` para una política
 y ``simulate_both`` para comparar las dos alternativas del enunciado.
@@ -7,28 +7,34 @@ y ``simulate_both`` para comparar las dos alternativas del enunciado.
 from __future__ import annotations
 
 import heapq
+import math
+import random
+import statistics
 from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 
 EPSILON = 1e-9
+MAX_ARRIVALS_PER_REPLICATION = 100_000
 
 
 @dataclass(frozen=True)
 class SimulationConfig:
     horizon: float = 480.0
     capacity: int = 5
-    arrival_interval_p1: float = 1.0
-    arrival_batch_p1: int = 1
-    arrival_interval_p2: float = 5.0
-    arrival_batch_p2: int = 3
+    arrival_count_p1: float = 1.0
+    arrival_window_p1: float = 1.0
+    arrival_count_p2: float = 3.0
+    arrival_window_p2: float = 5.0
     loaded_trip_time: float = 5.0
     empty_trip_time: float = 3.0
     patience: float = 12.0
     fare_per_car: float = 2.0
     cost_per_trip: float = 6.0
     loss_per_abandoned_car: float = 1.0
+    seed: int = 20260919
+    replications: int = 100
 
     @classmethod
     def from_mapping(cls, values: Optional[Dict[str, Any]]) -> "SimulationConfig":
@@ -36,10 +42,13 @@ class SimulationConfig:
             return cls()
         allowed = cls.__dataclass_fields__.keys()
         clean = {key: values[key] for key in allowed if key in values}
-        integer_fields = {"capacity", "arrival_batch_p1", "arrival_batch_p2"}
+        integer_fields = {"capacity", "seed", "replications"}
         for key in integer_fields:
             if key in clean:
-                clean[key] = int(clean[key])
+                number = float(clean[key])
+                if not math.isfinite(number) or not number.is_integer():
+                    raise ValueError(f"{key} debe ser un número entero")
+                clean[key] = int(number)
         for key in set(clean) - integer_fields:
             clean[key] = float(clean[key])
         config = cls(**clean)
@@ -47,13 +56,25 @@ class SimulationConfig:
         return config
 
     def validate(self) -> None:
+        for name in ("capacity", "seed", "replications"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{name} debe ser un número entero")
+        for name in (
+            "horizon", "arrival_count_p1", "arrival_window_p1",
+            "arrival_count_p2", "arrival_window_p2", "loaded_trip_time",
+            "empty_trip_time", "patience", "fare_per_car", "cost_per_trip",
+            "loss_per_abandoned_car",
+        ):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} debe ser un número finito")
         positive = {
             "horizon": self.horizon,
             "capacity": self.capacity,
-            "arrival_interval_p1": self.arrival_interval_p1,
-            "arrival_batch_p1": self.arrival_batch_p1,
-            "arrival_interval_p2": self.arrival_interval_p2,
-            "arrival_batch_p2": self.arrival_batch_p2,
+            "arrival_count_p1": self.arrival_count_p1,
+            "arrival_window_p1": self.arrival_window_p1,
+            "arrival_count_p2": self.arrival_count_p2,
+            "arrival_window_p2": self.arrival_window_p2,
             "loaded_trip_time": self.loaded_trip_time,
             "empty_trip_time": self.empty_trip_time,
             "patience": self.patience,
@@ -63,6 +84,16 @@ class SimulationConfig:
             raise ValueError("Deben ser positivos: " + ", ".join(invalid))
         if self.horizon > 100_000:
             raise ValueError("El horizonte maximo admitido es 100000 minutos")
+        if self.seed < 0 or self.seed > 2**32 - 1:
+            raise ValueError("La semilla debe estar entre 0 y 4294967295")
+        if not 1 <= self.replications <= 500:
+            raise ValueError("La cantidad de réplicas debe estar entre 1 y 500")
+        expected_arrivals = self.horizon * (
+            self.arrival_count_p1 / self.arrival_window_p1
+            + self.arrival_count_p2 / self.arrival_window_p2
+        )
+        if expected_arrivals > MAX_ARRIVALS_PER_REPLICATION:
+            raise ValueError("La tasa configurada produce demasiadas llegadas")
         for name in ("fare_per_car", "cost_per_trip", "loss_per_abandoned_car"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} no puede ser negativo")
@@ -82,6 +113,48 @@ class Car:
     trip_id: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class ArrivalSample:
+    """Una llegada individual y los valores que permiten auditar su cálculo."""
+
+    time: float
+    rnd: float
+    interarrival: float
+
+
+def generate_arrivals(config: SimulationConfig, seed: int) -> Dict[int, List[ArrivalSample]]:
+    """Genera una trayectoria común para comparar A y B con las mismas llegadas.
+
+    En cada parada se usa una secuencia independiente de RND U[0, 1). La
+    transformada inversa del apunte es T = -mu * ln(1 - RND), donde
+    mu = ventana / autos esperados. Se incluye una muestra posterior al
+    horizonte para mantener visible el calendario de la próxima llegada.
+    """
+    config.validate()
+    root_rng = random.Random(seed)
+    arrivals: Dict[int, List[ArrivalSample]] = {}
+    rates = {
+        1: config.arrival_count_p1 / config.arrival_window_p1,
+        2: config.arrival_count_p2 / config.arrival_window_p2,
+    }
+    for stop in (1, 2):
+        rng = random.Random(root_rng.getrandbits(64))
+        mean_interarrival = 1.0 / rates[stop]
+        samples: List[ArrivalSample] = []
+        time = 0.0
+        while time <= config.horizon:
+            rnd = rng.random()
+            interval = -mean_interarrival * math.log1p(-rnd)
+            if interval <= 0.0:
+                continue
+            time += interval
+            samples.append(ArrivalSample(time, rnd, interval))
+            if len(samples) > MAX_ARRIVALS_PER_REPLICATION:
+                raise ValueError("La trayectoria excedió el límite de llegadas")
+        arrivals[stop] = samples
+    return arrivals
+
+
 EVENT_PRIORITY = {
     "wagon_arrival": 10,
     "arrival_p1": 20,
@@ -95,11 +168,20 @@ EVENT_PRIORITY = {
 
 
 class Simulation:
-    def __init__(self, policy: str, config: SimulationConfig):
+    def __init__(
+        self,
+        policy: str,
+        config: SimulationConfig,
+        arrivals: Dict[int, List[ArrivalSample]],
+        record_detail: bool = True,
+    ):
         if policy not in {"A", "B"}:
             raise ValueError("La política debe ser A o B")
         self.policy = policy
         self.config = config
+        self.arrival_samples = arrivals
+        self.record_detail = record_detail
+        self.row_count = 0
         self.clock = 0.0
         self.last_clock = 0.0
         self.sequence = 0
@@ -139,10 +221,10 @@ class Simulation:
         self.queue_area = {1: 0.0, 2: 0.0}
         self.wagon_busy_area = 0.0
         self.max_queue = {1: 0, 2: 0}
-        self.next_arrival = {
-            1: config.arrival_interval_p1,
-            2: config.arrival_interval_p2,
-        }
+        self.next_arrival = {stop: arrivals[stop][0].time for stop in (1, 2)}
+        self.arrival_rnd = {stop: arrivals[stop][0].rnd for stop in (1, 2)}
+        self.interarrival = {stop: arrivals[stop][0].interarrival for stop in (1, 2)}
+        self.arrival_index = {1: 0, 2: 0}
 
     @staticmethod
     def _clean_time(value: float) -> float:
@@ -295,6 +377,8 @@ class Simulation:
             "arrivals_now_p1": 0,
             "arrivals_now_p2": 0,
             "arrived_ids": [],
+            "arrival_rnd_used": None,
+            "interarrival_used": None,
             "loaded_now": 0,
             "loaded_ids": [],
             "delivered_now": 0,
@@ -313,6 +397,10 @@ class Simulation:
         details: str = "",
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
+        row_number = self.row_count
+        self.row_count += 1
+        if not self.record_detail:
+            return
         context = context or self._event_context()
         # Cada fila de la tabla es una fotografia posterior al evento indicado.
         # Por eso conserva todos los estados aunque en esa fila solo haya
@@ -350,7 +438,7 @@ class Simulation:
             else "-"
         )
         row = {
-            "row": len(self.rows),
+            "row": row_number,
             "event_type": event_type,
             "event": event,
             "details": details,
@@ -358,6 +446,10 @@ class Simulation:
             **context,
             "next_arrival_p1": self.next_arrival[1],
             "next_arrival_p2": self.next_arrival[2],
+            "arrival_rnd_p1": self.arrival_rnd[1],
+            "arrival_rnd_p2": self.arrival_rnd[2],
+            "interarrival_p1": self.interarrival[1],
+            "interarrival_p2": self.interarrival[2],
             "next_abandon_p1": self._next_abandonment(1),
             "next_abandon_p2": self._next_abandonment(2),
             "wagon_state": self.wagon_state,
@@ -397,26 +489,26 @@ class Simulation:
 
     def _process_arrival(self, stop: int) -> None:
         context = self._event_context()
-        # La cantidad que llega es fija: 1 auto en P1 o un lote de 3 en P2
-        # con los parametros originales del enunciado.
-        quantity = (
-            self.config.arrival_batch_p1 if stop == 1 else self.config.arrival_batch_p2
-        )
-        created = self._arrive_cars(stop, quantity)
-        context[f"arrivals_now_p{stop}"] = quantity
+        # Cada evento representa un auto individual. El RND y el intervalo
+        # pertenecen a esta llegada y permiten reconstruir su hora.
+        sample = self.arrival_samples[stop][self.arrival_index[stop]]
+        if abs(self.clock - sample.time) > EPSILON:
+            raise RuntimeError("La llegada no coincide con su calendario")
+        created = self._arrive_cars(stop, 1)
+        context[f"arrivals_now_p{stop}"] = 1
         context["arrived_ids"] = created
+        context["arrival_rnd_used"] = sample.rnd
+        context["interarrival_used"] = sample.interarrival
 
-        interval = (
-            self.config.arrival_interval_p1
-            if stop == 1
-            else self.config.arrival_interval_p2
-        )
-        # No se usa una distribucion aleatoria. La proxima llegada se calcula
-        # sumando el intervalo deterministico al reloj actual.
-        next_time = self._clean_time(self.clock + interval)
-        self.next_arrival[stop] = next_time if next_time <= self.config.horizon + EPSILON else None
-        if self.next_arrival[stop] is not None:
-            self._schedule(next_time, f"arrival_p{stop}")
+        # La proxima fila de la secuencia fue generada con otro RND usando
+        # T = -(ventana/autos esperados) * ln(1 - RND).
+        self.arrival_index[stop] += 1
+        next_sample = self.arrival_samples[stop][self.arrival_index[stop]]
+        self.arrival_rnd[stop] = next_sample.rnd
+        self.interarrival[stop] = next_sample.interarrival
+        self.next_arrival[stop] = next_sample.time
+        if next_sample.time <= self.config.horizon + EPSILON:
+            self._schedule(next_sample.time, f"arrival_p{stop}")
 
         if (
             self.wagon_state == "Libre"
@@ -427,11 +519,10 @@ class Simulation:
             # agenda la salida en el mismo instante, luego de las llegadas.
             self._schedule_dispatch(self.clock)
 
-        noun = "auto" if quantity == 1 else "autos"
         self._snapshot(
             f"arrival_p{stop}",
-            f"Llegada de {quantity} {noun} a P{stop}",
-            ", ".join(created),
+            f"Llegada de 1 auto a P{stop}",
+            f"{created[0]} · RND {sample.rnd:.2f} · T {sample.interarrival:.2f} min",
             context,
         )
 
@@ -522,10 +613,11 @@ class Simulation:
 
     def run(self) -> Dict[str, Any]:
         self.config.validate()
-        # La primera llegada no ocurre en t=0: se agenda al completar el primer
-        # intervalo, es decir t=1 para P1 y t=5 para P2.
-        self._schedule(self.config.arrival_interval_p1, "arrival_p1")
-        self._schedule(self.config.arrival_interval_p2, "arrival_p2")
+        # La primera llegada de cada parada se obtiene de la transformada
+        # exponencial, no de un intervalo fijo ni de un lote de autos.
+        for stop in (1, 2):
+            if self.next_arrival[stop] <= self.config.horizon + EPSILON:
+                self._schedule(self.next_arrival[stop], f"arrival_p{stop}")
         self._schedule(self.config.horizon, "horizon")
 
         self._snapshot(
@@ -634,48 +726,111 @@ class Simulation:
             "max_queue_p2": self.max_queue[2],
             "wagon_utilization": self._clean_time(wagon_utilization),
             "loss_rate": self._clean_time(loss_rate),
-            "event_rows": len(self.rows),
+            "event_rows": self.row_count,
         }
         cars = []
-        for car in self.cars.values():
-            item = asdict(car)
-            # Para un auto que termina aun en cola, la espera visible es
-            # horizonte - llegada. Para los demas ya fue fijada al subir o salir.
-            item["current_wait"] = (
-                car.wait_time
-                if car.wait_time is not None
-                else self._clean_time(self.config.horizon - car.arrival_time)
-            )
-            item["system_time"] = (
-                self._clean_time(car.delivered_time - car.arrival_time)
-                if car.delivered_time is not None
-                else None
-            )
-            cars.append(item)
+        if self.record_detail:
+            for car in self.cars.values():
+                item = asdict(car)
+                # Para un auto que termina aun en cola, la espera visible es
+                # horizonte - llegada. Para los demas ya fue fijada al subir o salir.
+                item["current_wait"] = (
+                    car.wait_time
+                    if car.wait_time is not None
+                    else self._clean_time(self.config.horizon - car.arrival_time)
+                )
+                item["system_time"] = (
+                    self._clean_time(car.delivered_time - car.arrival_time)
+                    if car.delivered_time is not None
+                    else None
+                )
+                cars.append(item)
         return {
             "policy": self.policy,
             "summary": summary,
             "rows": self.rows,
             "cars": cars,
-            "trips": self.trips,
+            "trips": self.trips if self.record_detail else [],
         }
 
 
-def simulate(policy: str, config: Optional[SimulationConfig] = None) -> Dict[str, Any]:
-    return Simulation(policy, config or SimulationConfig()).run()
+def simulate(
+    policy: str,
+    config: Optional[SimulationConfig] = None,
+    arrivals: Optional[Dict[int, List[ArrivalSample]]] = None,
+    record_detail: bool = True,
+) -> Dict[str, Any]:
+    config = config or SimulationConfig()
+    config.validate()
+    if arrivals is None:
+        arrivals = generate_arrivals(config, config.seed)
+    return Simulation(policy, config, arrivals, record_detail).run()
 
 
 def simulate_both(values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = SimulationConfig.from_mapping(values)
-    results = {policy: simulate(policy, config) for policy in ("A", "B")}
-    best = max(results, key=lambda key: results[key]["summary"]["net_result"])
+    results: Dict[str, Dict[str, Any]] = {}
+    summaries: Dict[str, List[Dict[str, Any]]] = {"A": [], "B": []}
+    paired_differences: List[float] = []
+    winner_counts = {"A": 0, "B": 0, "tie": 0}
+
+    for replication in range(config.replications):
+        # Se reutiliza la misma trayectoria de llegadas en A y B. Asi, cada
+        # diferencia de resultado depende de la politica y no de un sorteo
+        # diferente de autos (numeros aleatorios comunes).
+        arrivals = generate_arrivals(config, config.seed + replication)
+        pair = {
+            policy: simulate(policy, config, arrivals, record_detail=(replication == 0))
+            for policy in ("A", "B")
+        }
+        if replication == 0:
+            results = pair
+        for policy in ("A", "B"):
+            summaries[policy].append(pair[policy]["summary"])
+        difference = pair["A"]["summary"]["net_result"] - pair["B"]["summary"]["net_result"]
+        paired_differences.append(difference)
+        winner_counts["A" if difference > 0 else "B" if difference < 0 else "tie"] += 1
+
+    compared_metrics = (
+        "arrivals_total", "boarded_total", "delivered_total", "lost_total",
+        "trips_total", "trips_empty", "avg_wait_boarded", "avg_queue_total",
+        "revenue", "operating_cost", "loss_cost", "net_result",
+    )
+    metrics = {
+        key: {
+            policy: round(statistics.fmean(item[key] for item in summaries[policy]), 9)
+            for policy in ("A", "B")
+        }
+        for key in compared_metrics
+    }
+    mean_difference = statistics.fmean(paired_differences)
+    ci95 = None
+    if config.replications > 1:
+        # IC normal aproximado del promedio de las diferencias pareadas A-B.
+        margin = 1.96 * statistics.stdev(paired_differences) / math.sqrt(config.replications)
+        ci95 = [round(mean_difference - margin, 9), round(mean_difference + margin, 9)]
+    best = "A" if mean_difference > 0 else "B" if mean_difference < 0 else "Empate"
+    confident = ci95 is not None and (ci95[0] > 0 or ci95[1] < 0)
     return {
         "config": asdict(config),
         "policies": results,
         "recommended_policy": best,
-        "comparison_basis": "Mayor resultado neto = ingresos - costos de traslados - pérdidas por abandono",
+        "comparison": {
+            "metrics": metrics,
+            "net_difference_mean": round(mean_difference, 9),
+            "net_difference_ci95": ci95,
+            "recommendation_confident": confident,
+            "winner_counts": winner_counts,
+            "replications": config.replications,
+            "sample_replication": 1,
+        },
+        "comparison_basis": "Mayor resultado neto promedio = ingresos - costos de traslados - pérdidas por abandono",
         "assumptions": [
-            "Las llegadas son determinísticas: la primera ocurre al completar cada intervalo.",
+            "Se interpreta '1 auto/min' y '3 autos/5 min' como tasas medias, no como llegadas exactas ni lotes simultáneos.",
+            "Cada auto llega individualmente; el tiempo entre llegadas es exponencial negativa: T = -mu * ln(1 - RND), con mu = minutos/autos.",
+            "Los RND, el reloj y los tiempos se muestran con dos decimales; los cálculos internos conservan su precisión completa.",
+            "Cada réplica usa las mismas llegadas para A y B; la semilla permite reproducirlas.",
+            "La tabla muestra la primera réplica; la comparación usa el promedio de todas las réplicas.",
             "Los autos se atienden FIFO en cada parada.",
             "Un auto puede subir con 12 minutos exactos de espera; si no sube, abandona en ese instante.",
             "En eventos simultáneos se procesa: arribo del vagón, llegadas de autos, despacho y abandono.",
@@ -687,9 +842,8 @@ def simulate_both(values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 def compact_summary(result: Dict[str, Any]) -> Iterable[Tuple[str, Any, Any]]:
-    """Ayuda de consola: produce filas comparativas A/B."""
-    left = result["policies"]["A"]["summary"]
-    right = result["policies"]["B"]["summary"]
+    """Ayuda de consola: produce promedios comparativos A/B."""
+    metrics = result["comparison"]["metrics"]
     for key in (
         "arrivals_total",
         "boarded_total",
@@ -704,12 +858,12 @@ def compact_summary(result: Dict[str, Any]) -> Iterable[Tuple[str, Any, Any]]:
         "loss_cost",
         "net_result",
     ):
-        yield key, left[key], right[key]
+        yield key, metrics[key]["A"], metrics[key]["B"]
 
 
 if __name__ == "__main__":
     comparison = simulate_both()
     print("Indicador\tPolítica A\tPolítica B")
     for metric, value_a, value_b in compact_summary(comparison):
-        print(f"{metric}\t{value_a}\t{value_b}")
+        print(f"{metric}\t{value_a:.2f}\t{value_b:.2f}")
     print(f"Recomendación: política {comparison['recommended_policy']}")

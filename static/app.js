@@ -1,26 +1,34 @@
 const DEFAULT_CONFIG = {
   horizon: 480,
   capacity: 5,
-  arrival_interval_p1: 1,
-  arrival_batch_p1: 1,
-  arrival_interval_p2: 5,
-  arrival_batch_p2: 3,
+  arrival_count_p1: 1,
+  arrival_window_p1: 1,
+  arrival_count_p2: 3,
+  arrival_window_p2: 5,
   loaded_trip_time: 5,
   empty_trip_time: 3,
   patience: 12,
   fare_per_car: 2,
   cost_per_trip: 6,
   loss_per_abandoned_car: 1,
+  seed: 20260919,
+  replications: 100,
 };
 
 const ROW_COLUMNS = [
   { group: "event", key: "row", label: "Fila", type: "integer", sticky: 0 },
   { group: "event", key: "event", label: "Evento", type: "event", sticky: 1 },
-  { group: "event", key: "time", label: "Reloj (min)", type: "time", sticky: 2 },
+  { group: "event", key: "time", label: "Reloj (min)", type: "precision", sticky: 2 },
+  { group: "arrivals", key: "arrival_rnd_used", label: "RND auto", type: "rnd" },
+  { group: "arrivals", key: "interarrival_used", label: "T auto", type: "precision" },
   { group: "arrivals", key: "arrivals_now_p1", label: "Llegan P1", type: "integer" },
-  { group: "arrivals", key: "next_arrival_p1", label: "Próx. llegada P1", type: "time" },
+  { group: "arrivals", key: "arrival_rnd_p1", label: "RND P1", type: "rnd" },
+  { group: "arrivals", key: "interarrival_p1", label: "T entre lleg. P1", type: "precision" },
+  { group: "arrivals", key: "next_arrival_p1", label: "Próx. llegada P1", type: "precision" },
   { group: "arrivals", key: "arrivals_now_p2", label: "Llegan P2", type: "integer" },
-  { group: "arrivals", key: "next_arrival_p2", label: "Próx. llegada P2", type: "time" },
+  { group: "arrivals", key: "arrival_rnd_p2", label: "RND P2", type: "rnd" },
+  { group: "arrivals", key: "interarrival_p2", label: "T entre lleg. P2", type: "precision" },
+  { group: "arrivals", key: "next_arrival_p2", label: "Próx. llegada P2", type: "precision" },
   { group: "wagon", key: "wagon_state", label: "Estado", type: "state" },
   { group: "wagon", key: "wagon_location", label: "Posición", type: "text" },
   { group: "wagon", key: "wagon_route", label: "Recorrido", type: "text" },
@@ -30,8 +38,8 @@ const ROW_COLUMNS = [
   { group: "wagon", key: "loaded_ids", label: "Autos que suben", type: "list" },
   { group: "wagon", key: "delivered_now", label: "Entregados", type: "integer" },
   { group: "wagon", key: "wagon_load_count", label: "Carga actual", type: "integer" },
-  { group: "wagon", key: "trip_departure", label: "Hora salida", type: "time" },
-  { group: "wagon", key: "next_wagon_arrival", label: "Fin traslado", type: "time" },
+  { group: "wagon", key: "trip_departure", label: "Hora salida", type: "precision" },
+  { group: "wagon", key: "next_wagon_arrival", label: "Fin traslado", type: "precision" },
   { group: "queue1", key: "queue_p1_count", label: "Cola", type: "integer" },
   { group: "queue1", key: "queue_p1", label: "Autos (espera)", type: "queue" },
   { group: "queue1", key: "oldest_wait_p1", label: "Mayor espera", type: "time" },
@@ -64,23 +72,23 @@ const ROW_COLUMNS = [
 const CAR_COLUMNS = [
   { group: "event", key: "id", label: "Auto", type: "text" },
   { group: "event", key: "stop", label: "Parada", type: "stop" },
-  { group: "arrivals", key: "arrival_time", label: "Hora llegada", type: "time" },
-  { group: "arrivals", key: "deadline", label: "Limite espera", type: "time" },
+  { group: "arrivals", key: "arrival_time", label: "Hora llegada", type: "precision" },
+  { group: "arrivals", key: "deadline", label: "Límite espera", type: "precision" },
   { group: "queue1", key: "state", label: "Estado final", type: "state" },
-  { group: "queue1", key: "current_wait", label: "Tiempo espera", type: "time" },
-  { group: "wagon", key: "board_time", label: "Hora de subida", type: "time" },
+  { group: "queue1", key: "current_wait", label: "Tiempo espera", type: "precision" },
+  { group: "wagon", key: "board_time", label: "Hora de subida", type: "precision" },
   { group: "wagon", key: "trip_id", label: "Traslado", type: "integer" },
-  { group: "wagon", key: "delivered_time", label: "Hora entrega", type: "time" },
-  { group: "wagon", key: "system_time", label: "Tiempo sistema", type: "time" },
-  { group: "queue2", key: "lost_time", label: "Hora abandono", type: "time" },
+  { group: "wagon", key: "delivered_time", label: "Hora entrega", type: "precision" },
+  { group: "wagon", key: "system_time", label: "Tiempo sistema", type: "precision" },
+  { group: "queue2", key: "lost_time", label: "Hora abandono", type: "precision" },
 ];
 
 const TRIP_COLUMNS = [
   { group: "event", key: "id", label: "Traslado", type: "integer" },
   { group: "wagon", key: "origin", label: "Origen", type: "stop" },
   { group: "wagon", key: "destination", label: "Destino", type: "stop" },
-  { group: "wagon", key: "departure_time", label: "Salida", type: "time" },
-  { group: "wagon", key: "arrival_time", label: "Llegada", type: "time" },
+  { group: "wagon", key: "departure_time", label: "Salida", type: "precision" },
+  { group: "wagon", key: "arrival_time", label: "Llegada", type: "precision" },
   { group: "wagon", key: "duration", label: "Duración", type: "time" },
   { group: "wagon", key: "kind", label: "Tipo", type: "state" },
   { group: "wagon", key: "load_count", label: "Carga", type: "integer" },
@@ -103,6 +111,8 @@ const GROUP_LABELS = {
 const moneyFormat = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 2 });
 const numberFormat = new Intl.NumberFormat("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const integerFormat = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 });
+const precisionFormat = new Intl.NumberFormat("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const rndFormat = new Intl.NumberFormat("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const state = {
   result: null,
@@ -116,7 +126,9 @@ const elements = {
   form: document.querySelector("#configForm"),
   status: document.querySelector("#statusBadge"),
   comparison: document.querySelector("#comparisonGrid"),
+  comparisonMeta: document.querySelector("#comparisonMeta"),
   recommendation: document.querySelector("#recommendation"),
+  traceContext: document.querySelector("#traceContext"),
   metrics: document.querySelector("#metricCards"),
   table: document.querySelector("#dataTable"),
   rowCount: document.querySelector("#rowCount"),
@@ -153,6 +165,8 @@ function classForState(value) {
 function formatValue(value, type = "text", row = {}) {
   if (value === null || value === undefined || value === "") return "—";
   if (type === "money") return moneyFormat.format(Number(value));
+  if (type === "precision") return precisionFormat.format(Number(value));
+  if (type === "rnd") return rndFormat.format(Number(value));
   if (type === "percent") return `${numberFormat.format(Number(value) * 100)} %`;
   if (type === "time" || type === "number") return numberFormat.format(Number(value));
   if (type === "integer") return integerFormat.format(Number(value));
@@ -204,7 +218,7 @@ function setLoading(loading) {
 async function runSimulation() {
   setLoading(true);
   elements.notice.classList.add("visible");
-  elements.notice.textContent = "Generando las dos trazas de eventos...";
+  elements.notice.textContent = "Generando llegadas exponenciales y comparando réplicas...";
   try {
     const response = await fetch("/api/simulate", {
       method: "POST",
@@ -215,8 +229,8 @@ async function runSimulation() {
     if (!response.ok) throw new Error(payload.error || "Error de simulación");
     state.result = payload;
     state.page = 1;
-    elements.timeFrom.value = 0;
-    elements.timeTo.value = payload.config.horizon;
+    elements.timeFrom.value = "0.00";
+    elements.timeTo.value = Number(payload.config.horizon).toFixed(2);
     document.querySelector("#assumptionList").innerHTML = payload.assumptions.map(item => `<li>${escapeHtml(item)}</li>`).join("");
     renderAll();
     showToast("Simulación completada");
@@ -229,24 +243,22 @@ async function runSimulation() {
 }
 
 function renderComparison() {
-  const summaries = {
-    A: state.result.policies.A.summary,
-    B: state.result.policies.B.summary,
-  };
+  const comparison = state.result.comparison;
+  const summaries = comparison.metrics;
   const metrics = [
     ["Resultado neto", "net_result", "money", "high"],
-    ["Autos entregados", "delivered_total", "integer", "high"],
-    ["Autos perdidos", "lost_total", "integer", "low"],
+    ["Autos entregados", "delivered_total", "number", "high"],
+    ["Autos perdidos", "lost_total", "number", "low"],
     ["Espera prom. atendidos", "avg_wait_boarded", "time", "low"],
     ["Cola promedio total", "avg_queue_total", "number", "low"],
-    ["Traslados totales", "trips_total", "integer", "none"],
-    ["Traslados vacíos", "trips_empty", "integer", "low"],
+    ["Traslados totales", "trips_total", "number", "none"],
+    ["Traslados vacíos", "trips_empty", "number", "low"],
     ["Costo de traslados", "operating_cost", "money", "low"],
   ];
-  let html = `<div class="head">Indicador</div><div class="head">Política A</div><div class="head">Política B</div>`;
+  let html = `<div class="head">Promedio de ${comparison.replications} réplicas</div><div class="head">Política A</div><div class="head">Política B</div>`;
   for (const [label, key, type, direction] of metrics) {
-    const a = summaries.A[key];
-    const b = summaries.B[key];
+    const a = summaries[key].A;
+    const b = summaries[key].B;
     const bestA = direction === "high" ? a > b : direction === "low" ? a < b : false;
     const bestB = direction === "high" ? b > a : direction === "low" ? b < a : false;
     html += `<div class="metric-name">${label}</div>`;
@@ -256,12 +268,23 @@ function renderComparison() {
   elements.comparison.classList.remove("skeleton-block");
   elements.comparison.innerHTML = html;
   const recommended = state.result.recommended_policy;
-  const difference = Math.abs(summaries.A.net_result - summaries.B.net_result);
-  elements.recommendation.textContent = `Conviene la política ${recommended} · ventaja ${moneyFormat.format(difference)}`;
+  const difference = comparison.net_difference_mean;
+  if (recommended === "Empate") {
+    elements.recommendation.textContent = "Promedios iguales";
+  } else if (comparison.recommendation_confident) {
+    elements.recommendation.textContent = `Mejor promedio: política ${recommended} · ventaja ${moneyFormat.format(Math.abs(difference))}`;
+  } else {
+    elements.recommendation.textContent = `Mayor promedio: ${recommended} · diferencia no concluyente`;
+  }
+  const ci = comparison.net_difference_ci95;
+  elements.comparisonMeta.textContent = ci
+    ? `Diferencia media A − B: ${moneyFormat.format(difference)} · IC 95 % aproximado: [${moneyFormat.format(ci[0])}; ${moneyFormat.format(ci[1])}]. Si el intervalo incluye $0, la ventaja no es concluyente.`
+    : `Diferencia A − B: ${moneyFormat.format(difference)}. Con una sola réplica no se calcula un intervalo de confianza.`;
 }
 
 function renderMetrics() {
   const summary = state.result.policies[state.policy].summary;
+  elements.traceContext.textContent = `Traza de la réplica 1 de ${state.result.config.replications} · semilla ${state.result.config.seed} · política ${state.policy}. Los indicadores de abajo pertenecen solo a esta réplica; la comparación superior usa promedios.`;
   const metrics = [
     ["Resultado neto", summary.net_result, "money", "accent"],
     ["Autos entregados", summary.delivered_total, "integer", ""],
@@ -359,7 +382,11 @@ function renderTable() {
 function showDetail(item) {
   if (!item) return;
   const pairs = state.view === "rows" ? [
-    ["Evento", item.event], ["Detalle", item.details], ["Reloj", formatValue(item.time, "time")],
+    ["Evento", item.event], ["Detalle", item.details], ["Reloj", formatValue(item.time, "precision")],
+    ["RND del auto que llegó", formatValue(item.arrival_rnd_used, "rnd")],
+    ["Tiempo entre llegadas generado", formatValue(item.interarrival_used, "precision")],
+    ["Próxima P1: RND / T / hora", `${formatValue(item.arrival_rnd_p1, "rnd")} / ${formatValue(item.interarrival_p1, "precision")} / ${formatValue(item.next_arrival_p1, "precision")}`],
+    ["Próxima P2: RND / T / hora", `${formatValue(item.arrival_rnd_p2, "rnd")} / ${formatValue(item.interarrival_p2, "precision")} / ${formatValue(item.next_arrival_p2, "precision")}`],
     ["Estado del vagón", `${item.wagon_state} · ${item.wagon_location}`],
     ["Carga del vagón", item.wagon_load_ids?.join(", ") || "Vacío"],
     ["Cola P1", formatValue(item.queue_p1, "queue")], ["Cola P2", formatValue(item.queue_p2, "queue")],

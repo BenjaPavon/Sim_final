@@ -26,12 +26,12 @@
       <div>
         <p class="section-kicker">VECTOR DE ESTADO PROGRAMABLE</p>
         <h2>Cada evento, cada cola, cada auto.</h2>
-        <p class="hero-copy">Compare las dos políticas durante 480 minutos. La traza conserva el reloj, el calendario de eventos, el estado del vagón, las colas FIFO y los acumuladores económicos.</p>
+        <p class="hero-copy">Compare las dos políticas con llegadas exponenciales durante 480 minutos. La traza muestra cada evento y la comparación resume múltiples réplicas con las mismas llegadas para A y B.</p>
       </div>
       <div class="hero-route" aria-label="Esquema de las dos paradas">
-        <div class="stop-node"><b>P1</b><span>1 auto/min</span></div>
+        <div class="stop-node"><b>P1</b><span>1 auto/min en promedio</span></div>
         <div class="track"><span id="wagonIcon">VAGÓN · 5</span></div>
-        <div class="stop-node"><b>P2</b><span>3 autos/5 min</span></div>
+        <div class="stop-node"><b>P2</b><span>3 autos/5 min en promedio</span></div>
       </div>
     </section>
 
@@ -49,26 +49,32 @@
             <legend>Operacion</legend>
             <label>Horizonte (min)<input name="horizon" type="number" min="1" step="1" value="480"></label>
             <label>Capacidad del vagón<input name="capacity" type="number" min="1" step="1" value="5"></label>
-            <label>Viaje con carga (min)<input name="loaded_trip_time" type="number" min="0.01" step="0.1" value="5"></label>
-            <label>Viaje vacío (min)<input name="empty_trip_time" type="number" min="0.01" step="0.1" value="3"></label>
-            <label>Espera maxima (min)<input name="patience" type="number" min="0.01" step="0.1" value="12"></label>
+            <label>Viaje con carga (min)<input name="loaded_trip_time" type="number" min="0.01" step="0.01" value="5"></label>
+            <label>Viaje vacío (min)<input name="empty_trip_time" type="number" min="0.01" step="0.01" value="3"></label>
+            <label>Espera maxima (min)<input name="patience" type="number" min="0.01" step="0.01" value="12"></label>
           </fieldset>
           <fieldset>
-            <legend>Llegadas determinísticas</legend>
+            <legend>Llegadas exponenciales</legend>
+            <p class="field-note">Cada auto llega por separado. T = -μ ln(1 - RND). Se muestran 2 decimales; los cálculos conservan la precisión completa.</p>
             <div class="paired-inputs">
-              <label>P1 · lote<input name="arrival_batch_p1" type="number" min="1" step="1" value="1"></label>
-              <label>P1 · cada<input name="arrival_interval_p1" type="number" min="0.01" step="0.1" value="1"></label>
+              <label>P1 · autos promedio<input name="arrival_count_p1" type="number" min="0.01" step="0.01" value="1"></label>
+              <label>En minutos<input name="arrival_window_p1" type="number" min="0.01" step="0.01" value="1"></label>
             </div>
             <div class="paired-inputs">
-              <label>P2 · lote<input name="arrival_batch_p2" type="number" min="1" step="1" value="3"></label>
-              <label>P2 · cada<input name="arrival_interval_p2" type="number" min="0.01" step="0.1" value="5"></label>
+              <label>P2 · autos promedio<input name="arrival_count_p2" type="number" min="0.01" step="0.01" value="3"></label>
+              <label>En minutos<input name="arrival_window_p2" type="number" min="0.01" step="0.01" value="5"></label>
             </div>
+          </fieldset>
+          <fieldset>
+            <legend>Experimento</legend>
+            <label>Semilla aleatoria<input name="seed" type="number" min="0" max="4294967295" step="1" value="20260919"></label>
+            <label>Réplicas (1 a 500)<input name="replications" type="number" min="1" max="500" step="1" value="100"></label>
           </fieldset>
           <fieldset>
             <legend>Economia ($)</legend>
-            <label>Ingreso por auto<input name="fare_per_car" type="number" min="0" step="0.1" value="2"></label>
-            <label>Costo por traslado<input name="cost_per_trip" type="number" min="0" step="0.1" value="6"></label>
-            <label>Pérdida por abandono<input name="loss_per_abandoned_car" type="number" min="0" step="0.1" value="1"></label>
+            <label>Ingreso por auto<input name="fare_per_car" type="number" min="0" step="0.01" value="2"></label>
+            <label>Costo por traslado<input name="cost_per_trip" type="number" min="0" step="0.01" value="6"></label>
+            <label>Pérdida por abandono<input name="loss_per_abandoned_car" type="number" min="0" step="0.01" value="1"></label>
           </fieldset>
           <button class="button primary full" type="submit"><span>▶</span> Simular ambas políticas</button>
         </form>
@@ -84,6 +90,7 @@
             <div id="recommendation" class="recommendation">Calculando...</div>
           </div>
           <div id="comparisonGrid" class="comparison-grid skeleton-block"></div>
+          <p id="comparisonMeta" class="comparison-meta"></p>
         </section>
 
         <section class="trace-card">
@@ -99,11 +106,13 @@
             </div>
           </div>
 
+          <p id="traceContext" class="trace-context">La tabla muestra la réplica 1.</p>
+
           <div id="metricCards" class="metric-cards"></div>
 
           <div class="filterbar">
-            <label>Desde min <input id="timeFrom" type="number" min="0" step="1" value="0"></label>
-            <label>Hasta min <input id="timeTo" type="number" min="0" step="1" value="480"></label>
+            <label>Desde min <input id="timeFrom" type="number" min="0" step="0.01" value="0.00"></label>
+            <label>Hasta min <input id="timeTo" type="number" min="0" step="0.01" value="480.00"></label>
             <label id="eventFilterWrap">Evento
               <select id="eventFilter">
                 <option value="all">Todos</option>

@@ -81,6 +81,7 @@ input, select { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px sol
 input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(15,91,82,.12); }
 .paired-inputs { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .paired-inputs > label, input, select { min-width: 0; }
+.field-note { margin: 2px 0 9px; color: var(--muted); font-size: 10px; line-height: 1.45; }
 
 .button, .icon-button { border: 0; cursor: pointer; transition: transform .15s ease, background .15s ease; }
 .button:hover, .icon-button:hover { transform: translateY(-1px); }
@@ -100,11 +101,13 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .comparison-grid .metric-name { color: var(--muted); font-weight: 700; }
 .comparison-grid .best { color: var(--teal-dark); background: #edf7d0; font-weight: 900; }
 .comparison-grid .money { font-size: 15px; font-weight: 900; }
+.comparison-meta { margin: 12px 1px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .skeleton-block:empty { min-height: 190px; background: linear-gradient(100deg, #eee 30%, #fafafa 50%, #eee 70%); background-size: 300% 100%; animation: shimmer 1.4s infinite; }
 @keyframes shimmer { to { background-position: -150% 0; } }
 
 .trace-card { min-width: 0; overflow: hidden; }
 .trace-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.trace-context { margin: 0; padding: 9px 18px; color: var(--teal-dark); background: #edf5e5; border-bottom: 1px solid var(--line); font-size: 11px; line-height: 1.45; }
 .segmented, .view-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: #ecf0eb; }
 .policy-tab, .view-tab { min-height: 34px; padding: 7px 11px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 11px; font-weight: 800; }
 .policy-tab span { display: inline-grid; width: 20px; height: 20px; place-items: center; margin-right: 5px; border-radius: 50%; background: #d6ddd8; }
