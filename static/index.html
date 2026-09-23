@@ -26,12 +26,12 @@
       <div>
         <p class="section-kicker">VECTOR DE ESTADO PROGRAMABLE</p>
         <h2>Cada evento, cada cola, cada auto.</h2>
-        <p class="hero-copy">Compare las dos políticas con llegadas exponenciales durante 480 minutos. La traza muestra cada evento y la comparación resume múltiples réplicas con las mismas llegadas para A y B.</p>
+        <p class="hero-copy">Compare las dos políticas con llegadas exponenciales durante el horizonte elegido. La traza muestra cada evento y la comparación resume múltiples réplicas con las mismas llegadas para A y B.</p>
       </div>
       <div class="hero-route" aria-label="Esquema de las dos paradas">
-        <div class="stop-node"><b>P1</b><span>1 auto/min en promedio</span></div>
+        <div class="stop-node"><b>P1</b><span id="arrivalLabelP1">1 auto/min en promedio</span></div>
         <div class="track"><span id="wagonIcon">VAGÓN · 5</span></div>
-        <div class="stop-node"><b>P2</b><span>3 autos/5 min en promedio</span></div>
+        <div class="stop-node"><b>P2</b><span id="arrivalLabelP2">3 autos/5 min en promedio</span></div>
       </div>
     </section>
 
@@ -55,7 +55,7 @@
           </fieldset>
           <fieldset>
             <legend>Llegadas exponenciales</legend>
-            <p class="field-note">Cada auto llega por separado. T = -μ ln(1 - RND). Se muestran 2 decimales; los cálculos conservan la precisión completa.</p>
+            <p class="field-note">Cada auto llega por separado. T = -μ ln(1 - RND). Se muestran 2 decimales; el calendario usa 9 decimales.</p>
             <div class="paired-inputs">
               <label>P1 · autos promedio<input name="arrival_count_p1" type="number" min="0.01" step="0.01" value="1"></label>
               <label>En minutos<input name="arrival_window_p1" type="number" min="0.01" step="0.01" value="1"></label>
@@ -96,7 +96,7 @@
         <section class="trace-card">
           <div class="trace-toolbar">
             <div class="segmented" role="tablist" aria-label="Política">
-              <button class="policy-tab active" data-policy="A" type="button"><span>A</span> Espera 5 autos</button>
+              <button class="policy-tab active" data-policy="A" type="button"><span>A</span> <b id="policyALabel">Espera 5 autos</b></button>
               <button class="policy-tab" data-policy="B" type="button"><span>B</span> Sale siempre</button>
             </div>
             <div class="view-tabs" role="tablist" aria-label="Vista">
@@ -134,6 +134,7 @@
           </div>
 
           <div id="tableNotice" class="table-notice">Cargando datos...</div>
+          <p class="trace-context" id="carColumnsHint">Al final del vector hay una columna por auto con sus atributos en cada evento. Desplazá la tabla hacia la derecha. Antes de su llegada se muestra —.</p>
           <div class="table-shell">
             <table id="dataTable" aria-label="Vector de estado de la simulación"></table>
           </div>

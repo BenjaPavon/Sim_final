@@ -106,7 +106,71 @@ const GROUP_LABELS = {
   queue2: "Cola · Parada 2",
   stats: "Acumuladores",
   money: "Resultado económico",
+  cars: "Autos · atributos en cada evento",
 };
+
+// El backend conserva los hitos de cada auto en las filas y sus atributos
+// finales en `cars`. Este índice permite reconstruir la historia sin copiar
+// todos los autos en cada fila del JSON (filas × autos).
+const carColumnCache = new WeakMap();
+
+function carColumnsForPolicy(policy) {
+  if (carColumnCache.has(policy)) return carColumnCache.get(policy);
+  const milestones = new Map(policy.cars.map(car => [car.id, {}]));
+  for (const row of policy.rows) {
+    for (const [idsKey, milestone] of [
+      ["arrived_ids", "arrival"], ["loaded_ids", "board"],
+      ["delivered_ids", "delivery"], ["abandoned_ids", "loss"],
+    ]) {
+      for (const id of row[idsKey] || []) milestones.get(id)[milestone] = row.row;
+    }
+  }
+  const columns = policy.cars.map(car => ({
+    group: "cars", key: car.id, label: car.id, type: "car",
+    car, milestones: milestones.get(car.id), htmlByState: new Map(),
+  }));
+  carColumnCache.set(policy, columns);
+  return columns;
+}
+
+function carAtRow(column, row) {
+  const { car, milestones } = column;
+  // Comparamos número de fila, no solo reloj: llegada, subida y entrega
+  // pueden compartir un instante y aun así son eventos distintos.
+  const occurred = milestone => milestones[milestone] !== undefined && milestones[milestone] <= row.row;
+  if (!occurred("arrival")) return null;
+  const boarded = occurred("board");
+  const delivered = occurred("delivery");
+  const lost = occurred("loss");
+  return {
+    id: car.id,
+    stop: car.stop,
+    arrival_time: car.arrival_time,
+    deadline: car.deadline,
+    state: delivered ? "Entregado" : lost ? "Perdido" : boarded ? "En viaje" : "En cola",
+    current_wait: boarded || lost ? car.wait_time : Math.max(0, row.time - car.arrival_time),
+    board_time: boarded ? car.board_time : null,
+    trip_id: boarded ? car.trip_id : null,
+    delivered_time: delivered ? car.delivered_time : null,
+    system_time: delivered ? car.system_time : null,
+    lost_time: lost ? car.lost_time : null,
+  };
+}
+
+function formatCarAtRow(column, row) {
+  const car = carAtRow(column, row);
+  if (!car) return "—";
+  // Fuera de la cola sus atributos permanecen fijos hasta el próximo estado.
+  if (column.htmlByState.has(car.state)) return column.htmlByState.get(car.state);
+  // Una columna física por auto, con los mismos atributos de la vista Autos.
+  // El identificador está en el encabezado; el estado corresponde a esta fila.
+  const html = CAR_COLUMNS.filter(attribute => attribute.key !== "id").map(attribute => {
+    const label = attribute.key === "state" ? "Estado" : attribute.label;
+    return `${escapeHtml(label)}: ${formatValue(car[attribute.key], attribute.type)}`;
+  }).join("\n");
+  if (car.state !== "En cola") column.htmlByState.set(car.state, html);
+  return html;
+}
 
 const moneyFormat = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 2 });
 const numberFormat = new Intl.NumberFormat("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -283,6 +347,12 @@ function renderComparison() {
 }
 
 function renderMetrics() {
+  const config = state.result.config;
+  document.querySelector("#policyALabel").textContent = `Espera ${config.capacity} autos`;
+  document.querySelector("#wagonIcon").textContent = `VAGÓN · ${config.capacity}`;
+  for (const stop of [1, 2]) {
+    document.querySelector(`#arrivalLabelP${stop}`).textContent = `${config[`arrival_count_p${stop}`]} autos/${config[`arrival_window_p${stop}`]} min en promedio`;
+  }
   const summary = state.result.policies[state.policy].summary;
   elements.traceContext.textContent = `Traza de la réplica 1 de ${state.result.config.replications} · semilla ${state.result.config.seed} · política ${state.policy}. Los indicadores de abajo pertenecen solo a esta réplica; la comparación superior usa promedios.`;
   const metrics = [
@@ -301,7 +371,7 @@ function renderMetrics() {
 function columnsForView() {
   if (state.view === "cars") return CAR_COLUMNS;
   if (state.view === "trips") return TRIP_COLUMNS;
-  return ROW_COLUMNS;
+  return [...ROW_COLUMNS, ...carColumnsForPolicy(state.result.policies[state.policy])];
 }
 
 function itemsForView() {
@@ -333,7 +403,8 @@ function groupHeaders(columns) {
   const groups = [];
   for (const column of columns) {
     const previous = groups.at(-1);
-    if (previous && previous.name === column.group) previous.count += 1;
+    // HTML limita colspan a 1000; se repite el grupo si hay más autos.
+    if (previous && previous.name === column.group && previous.count < 1000) previous.count += 1;
     else groups.push({ name: column.group, count: 1 });
   }
   return groups.map(group => `<th colspan="${group.count}" class="group-${group.name}">${GROUP_LABELS[group.name]}</th>`).join("");
@@ -358,6 +429,7 @@ function renderTable() {
       const sticky = column.sticky !== undefined ? ` sticky-col sticky-${column.sticky}` : "";
       const text = ["event", "text", "queue", "state", "list"].includes(column.type) ? " text" : "";
       const queue = column.type === "queue" ? " queue-cell" : "";
+      if (column.type === "car") return `<td class="car-cell">${formatCarAtRow(column, item)}</td>`;
       const raw = item[column.key];
       const title = column.type === "queue" || column.type === "list" ? ` title="${escapeHtml(formatValue(raw, column.type, item))}"` : "";
       return `<td class="${sticky}${text}${queue}"${title}>${formatValue(raw, column.type, item)}</td>`;
@@ -366,6 +438,7 @@ function renderTable() {
   }).join("");
 
   elements.table.innerHTML = `<thead><tr>${groupHeaders(columns)}</tr><tr>${labels}</tr></thead><tbody>${body}</tbody>`;
+  document.querySelector("#carColumnsHint").classList.toggle("hidden", state.view !== "rows");
   elements.rowCount.textContent = `${integerFormat.format(items.length)} filas`;
   elements.pageLabel.textContent = `Página ${state.page} de ${totalPages}`;
   elements.previous.disabled = state.page <= 1;

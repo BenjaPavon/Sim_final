@@ -228,6 +228,8 @@ class Simulation:
 
     @staticmethod
     def _clean_time(value: float) -> float:
+        # El calendario usa 9 decimales; la interfaz muestra solo 2.
+        # No se ordenan eventos con los valores redondeados de la pantalla.
         return round(float(value), 9)
 
     def _schedule(self, time: float, kind: str, payload: Any = None) -> None:
@@ -693,7 +695,7 @@ class Simulation:
         summary = {
             "policy": self.policy,
             "policy_name": (
-                "Espera completar 5 autos"
+                f"Espera completar {self.config.capacity} autos"
                 if self.policy == "A"
                 else "Sale siempre al finalizar cada traslado"
             ),
@@ -828,11 +830,11 @@ def simulate_both(values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "assumptions": [
             "Se interpreta '1 auto/min' y '3 autos/5 min' como tasas medias, no como llegadas exactas ni lotes simultáneos.",
             "Cada auto llega individualmente; el tiempo entre llegadas es exponencial negativa: T = -mu * ln(1 - RND), con mu = minutos/autos.",
-            "Los RND, el reloj y los tiempos se muestran con dos decimales; los cálculos internos conservan su precisión completa.",
+            "Los RND, el reloj y los tiempos se muestran con dos decimales; el calendario de eventos usa nueve decimales y la generación exponencial usa la precisión de float.",
             "Cada réplica usa las mismas llegadas para A y B; la semilla permite reproducirlas.",
             "La tabla muestra la primera réplica; la comparación usa el promedio de todas las réplicas.",
             "Los autos se atienden FIFO en cada parada.",
-            "Un auto puede subir con 12 minutos exactos de espera; si no sube, abandona en ese instante.",
+            f"Un auto puede subir con {config.patience:g} minutos exactos de espera; si no sube, abandona en ese instante.",
             "En eventos simultáneos se procesa: arribo del vagón, llegadas de autos, despacho y abandono.",
             "La política B inicia en t=0 con un traslado vacío desde P1.",
             "Los eventos ocurridos exactamente en el minuto final se incluyen.",

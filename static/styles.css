@@ -142,6 +142,8 @@ th.group-queue1 { background: #e5ef9c; }
 th.group-queue2 { background: #cbe9e3; }
 th.group-stats { background: #bdd6e9; }
 th.group-money { color: white !important; background: var(--teal); }
+th.group-cars { background: var(--mint); }
+.car-cell { min-width: 190px; text-align: left; vertical-align: top; white-space: pre-line; line-height: 1.5; }
 td.text, th.text { text-align: left; }
 tbody tr:nth-child(even) td { background: #fbfbf7; }
 tbody tr { cursor: pointer; }

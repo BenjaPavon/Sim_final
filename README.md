@@ -2,6 +2,8 @@
 
 Aplicación web para resolver y auditar el ejercicio del cruce ferroviario. El motor está implementado en Python como una simulación estocástica de eventos discretos y la interfaz reproduce la lógica de un vector de estado de planilla: una fila por evento y grupos de columnas para reloj, llegadas, vagón, colas, acumuladores y resultado económico.
 
+La [guía para explicar y defender la aplicación](GUIA_SIMULACION.md) recorre parámetros, llegadas, agenda de eventos, políticas, autos, colas y estadísticas con fórmulas, ejemplos y referencias a funciones y líneas del código.
+
 ## Ejecutar
 
 En Windows, haga doble clic en `run.bat` o ejecute:
@@ -22,6 +24,7 @@ Luego abra <http://127.0.0.1:8000>. No hace falta instalar paquetes: el proyecto
 - Cantidad, contenido FIFO y mayor espera de cada cola.
 - Acumuladores de llegadas, embarques, entregas, perdidas, viajes y tiempos de espera.
 - Ingresos, costos operativos, penalizaciones y resultado neto en cada fila.
+- Una columna por auto al final del vector, con sus atributos históricos en cada evento; antes de ingresar se muestra `—`.
 - Vistas auxiliares de todos los autos y todos los traslados.
 - Parámetros editables para ensayar escenarios distintos.
 - Semilla y número de réplicas configurables para reproducir el experimento.
@@ -34,7 +37,7 @@ Para cada auto se obtiene un `RND` uniforme en `[0, 1)` y se calcula el tiempo h
 
 `T = -μ × ln(1 - RND)`, con `μ = minutos de referencia / autos esperados`.
 
-La interfaz muestra RND, reloj y tiempos con dos decimales. El motor conserva la precisión completa para calcular y ordenar los eventos; por eso la fórmula puede dar una pequeña diferencia si se reemplaza el RND por su valor visible redondeado.
+La interfaz muestra RND, reloj y tiempos con dos decimales. La generación usa la precisión de `float` y el calendario redondea a nueve decimales; por eso la fórmula puede dar una pequeña diferencia si se reemplaza el RND por su valor visible redondeado.
 
 - P1: `λ = 1` auto/min y `μ = 1` min/auto.
 - P2: `λ = 3/5 = 0,6` autos/min y `μ = 5/3 ≈ 1,667` min/auto.
@@ -65,9 +68,12 @@ Con una sola réplica se muestra la diferencia observada, pero no se calcula int
 
 ```powershell
 python -m unittest discover -s tests -v
+node --test tests/test_car_columns.js
 ```
 
 Las pruebas controlan la fórmula exponencial, reproducibilidad por semilla, igualdad de llegadas entre políticas, conservación de autos, identidad económica, FIFO, espera máxima, orden cronológico, viajes completos de la política A y el desempate en el minuto exacto de abandono.
+
+Las pruebas JavaScript requieren Node.js y Python (configurable mediante `SIM_PYTHON`). Verifican la historia de las columnas individuales y su coincidencia con las colas, carga y contadores del motor; no agregan dependencias para ejecutar la aplicación.
 
 ## Estructura
 
