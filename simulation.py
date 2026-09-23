@@ -319,7 +319,8 @@ class Simulation:
         self.loaded_trip_count += int(bool(load))
         self.full_trip_count += int(len(load) == self.config.capacity)
         self.empty_trip_count += int(not load)
-        # Ingreso del viaje = autos que suben * tarifa por auto.
+        # Acumuladores de las columnas economicas del vector:
+        # ingreso += autos que suben * tarifa; costo += costo por salida.
         # Cada salida genera el costo completo, incluso una salida vacia.
         self.revenue += len(load) * self.config.fare_per_car
         self.operating_cost += self.config.cost_per_trip
@@ -426,7 +427,9 @@ class Simulation:
             )
 
         elapsed = self.clock if self.clock > 0 else 0.0
-        # Resultado neto acumulado hasta esta fila.
+        # Columnas economicas de esta fila. `revenue`, `operating_cost` y
+        # `loss_cost` son acumuladores; el resultado neto se vuelve a derivar
+        # después de cada evento para mostrar su valor actualizado.
         net_result = self.revenue - self.operating_cost - self.loss_cost
         # Estos dos indicadores son parciales: usan el tiempo transcurrido hasta
         # la fila actual, no el horizonte completo.
@@ -600,7 +603,8 @@ class Simulation:
         car.wait_time = self._clean_time(self.clock - car.arrival_time)
         self.queue_counts[stop] -= 1
         self.lost[stop] += 1
-        # Acumuladores usados para la espera promedio de perdidos y el costo.
+        # Acumuladores usados para la espera promedio de perdidos y la columna
+        # economica "Perdida abandonos". Se suman una sola vez, al abandonar.
         self.wait_lost += car.wait_time
         self.loss_cost += self.config.loss_per_abandoned_car
         context = self._event_context()
@@ -676,7 +680,7 @@ class Simulation:
         lost_total = self.lost[1] + self.lost[2]
         total_arrivals = self.arrived[1] + self.arrived[2]
 
-        # Formulas economicas finales.
+        # Misma formula que en cada fila del vector, ahora para el resumen final.
         net_result = self.revenue - self.operating_cost - self.loss_cost
 
         # Promedio de espera atendidos = suma de esperas / autos que subieron.

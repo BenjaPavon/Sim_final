@@ -63,12 +63,20 @@ const ROW_COLUMNS = [
   { group: "stats", key: "acc_wait_lost", label: "AC espera perdidos", type: "number" },
   { group: "stats", key: "avg_queue", label: "Cola prom.", type: "number" },
   { group: "stats", key: "wagon_utilization", label: "Utilización", type: "percent" },
+  // Estas columnas no hacen los cálculos: muestran los acumuladores que arma
+  // `Simulation._snapshot` en simulation.py. Los ingresos y costos aumentan en
+  // `_start_trip`, la pérdida por abandono en `_process_abandonment`, y el neto
+  // se obtiene en cada fila como ingresos - costos de viajes - pérdidas.
   { group: "money", key: "revenue", label: "Ingresos", type: "money" },
   { group: "money", key: "operating_cost", label: "Costo viajes", type: "money" },
   { group: "money", key: "loss_cost", label: "Pérdida abandonos", type: "money" },
   { group: "money", key: "net_result", label: "Resultado neto", type: "money" },
 ];
 
+// `CAR_COLUMNS` solo define cómo se presentan los atributos finales en la vista
+// Autos. El motor los crea en `_arrive_cars`, fija subida y espera atendida en
+// `_board`, fija entrega en `_process_wagon_arrival` y abandono/espera perdida
+// en `_process_abandonment`. `_result` deriva `current_wait` y `system_time`.
 const CAR_COLUMNS = [
   { group: "event", key: "id", label: "Auto", type: "text" },
   { group: "event", key: "stop", label: "Parada", type: "stop" },
@@ -142,6 +150,10 @@ function carAtRow(column, row) {
   const boarded = occurred("board");
   const delivered = occurred("delivery");
   const lost = occurred("loss");
+  // Esta función reconstruye los valores visibles en la columna del auto para
+  // esta fila. No acumula esperas: `wait_time` ya fue fijado por Python cuando
+  // el auto subió o abandonó. Solo mientras sigue en cola calcula la espera
+  // transitoria como reloj de la fila - hora de llegada.
   return {
     id: car.id,
     stop: car.stop,
@@ -152,6 +164,7 @@ function carAtRow(column, row) {
     board_time: boarded ? car.board_time : null,
     trip_id: boarded ? car.trip_id : null,
     delivered_time: delivered ? car.delivered_time : null,
+    // `system_time` llega calculado por `_result`: entrega - llegada.
     system_time: delivered ? car.system_time : null,
     lost_time: lost ? car.lost_time : null,
   };
